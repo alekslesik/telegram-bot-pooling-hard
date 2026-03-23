@@ -65,7 +65,8 @@ Main variables:
 - `TOKEN` - Telegram bot token.
 - `USERNAME` - bot username (without `@`).
 - `COMPOSE_PROJECT_NAME` - unique compose project name for running multiple bots on one server.
-- `DB_DSN` - PostgreSQL DSN for persistent booking/state storage. If empty, in-memory repository is used.
+- `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` - required for Docker Compose Postgres (set `POSTGRES_PASSWORD` to a strong secret in `.env`; do not commit `.env`).
+- `DB_DSN` - PostgreSQL DSN for the bot. If empty, in-memory repository is used. When using Compose, point at the `postgres` service and match `POSTGRES_*` (see [.env.example](.env.example)).
 - `APP_ENV`, `LOG_LEVEL`, `LOG_FORMAT` - runtime options.
 
 ### Database migration
@@ -96,7 +97,7 @@ make docker-run
 make docker-compose-up
 ```
 
-The default [docker-compose.yaml](docker-compose.yaml) starts **PostgreSQL** with a `healthcheck` and starts the **bot only after the database is healthy** (`depends_on: condition: service_healthy`). Set `DB_DSN` in `.env` to point at the `postgres` service host (see [.env.example](.env.example)).
+The default [docker-compose.yaml](docker-compose.yaml) starts **PostgreSQL** with a `healthcheck` and starts the **bot only after the database is healthy** (`depends_on: condition: service_healthy`). You must set `POSTGRES_PASSWORD` (and a matching `DB_DSN`) in `.env`; the compose files do not embed default database passwords (see [.env.example](.env.example)).
 
 Stop:
 
