@@ -1,0 +1,9 @@
+services:
+  bot:
+    image: ${APP_IMAGE:-telegram-bot-simple}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    restart: unless-stopped

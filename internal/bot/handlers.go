@@ -1,0 +1,316 @@
+package bot
+
+import (
+	"bytes"
+	"log/slog"
+	"strings"
+	"text/template"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+)
+
+// TelegramClient — минимум для Send и ответа на callback (answerCallbackQuery).
+type TelegramClient interface {
+	Send(tgbotapi.Chattable) (tgbotapi.Message, error)
+	Request(tgbotapi.Chattable) (*tgbotapi.APIResponse, error)
+}
+
+type Handlers struct {
+	Bot    TelegramClient
+	Logger *slog.Logger
+}
+
+type Command struct {
+	Name        string
+	Description string
+	ParseMode   string
+	BuildText   func(msg *tgbotapi.Message) string
+}
+
+type UseCaseCategory struct {
+	Title string
+	Items []string
+}
+
+var commandButtons = map[string]string{
+	"🚀 Старт":            "start",
+	"📋 Демо-меню":        "menu",
+	"🆘 Помощь":           "help",
+	"ℹ️ О боте":          "about",
+	"💼 Примеры задач":    "usecases",
+	"🧩 Возможности":      "features",
+	"✅ Проверка статуса": "ping",
+	"🗣️ Повторить текст": "echo",
+}
+
+// demoInlineMenuKeyboard — те же пункты, что reply-клавиатура и меню у поля ввода.
+func demoInlineMenuKeyboard() tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🚀 Старт", "cmd:start"),
+			tgbotapi.NewInlineKeyboardButtonData("📋 Демо-меню", "cmd:menu"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🆘 Помощь", "cmd:help"),
+			tgbotapi.NewInlineKeyboardButtonData("ℹ️ О боте", "cmd:about"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("💼 Примеры задач", "cmd:usecases"),
+			tgbotapi.NewInlineKeyboardButtonData("🧩 Возможности", "cmd:features"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✅ Проверка статуса", "cmd:ping"),
+			tgbotapi.NewInlineKeyboardButtonData("🗣️ Повторить текст", "cmd:echo"),
+		),
+	)
+}
+
+func commandKeyboard() tgbotapi.ReplyKeyboardMarkup {
+	return tgbotapi.NewReplyKeyboard(
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("🚀 Старт"),
+			tgbotapi.NewKeyboardButton("📋 Демо-меню"),
+		),
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("🆘 Помощь"),
+			tgbotapi.NewKeyboardButton("ℹ️ О боте"),
+		),
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("💼 Примеры задач"),
+			tgbotapi.NewKeyboardButton("🧩 Возможности"),
+		),
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("✅ Проверка статуса"),
+			tgbotapi.NewKeyboardButton("🗣️ Повторить текст"),
+		),
+	)
+}
+
+var useCases = []UseCaseCategory{
+	{
+		Title: "Салон / студия / услуги",
+		Items: []string{
+			"рассказать про услуги и цены",
+			"принять заявку или запись",
+			"отправить напоминание перед визитом",
+		},
+	},
+	{
+		Title: "Онлайн‑курсы / эксперты",
+		Items: []string{
+			"выдать материалы и инструкции",
+			"собрать вопросы от учеников",
+			"аккуратно предлагать доп. продукты",
+		},
+	},
+	{
+		Title: "Малый бизнес",
+		Items: []string{
+			"ответы на частые вопросы",
+			"получение контакта для звонка",
+			"быстрые опросы клиентов",
+		},
+	},
+}
+
+var usecasesTmpl = template.Must(template.New("usecases").Funcs(template.FuncMap{
+	"add1": func(i int) int { return i + 1 },
+}).Parse(
+	`*Примеры задач, для которых подходит такой бот:*
+
+{{- range $i, $c := . }}
+{{ add1 $i }}. {{ $c.Title }}:
+{{- range $c.Items }}
+   — {{ . }}
+{{- end }}
+
+{{- end }}
+Идея простая: всё, что менеджер делает руками в переписке, можно постепенно перенести в бота.`,
+))
+
+func renderUseCases() string {
+	var buf bytes.Buffer
+	_ = usecasesTmpl.Execute(&buf, useCases)
+	return buf.String()
+}
+
+func (h Handlers) commandRegistry() map[string]Command {
+	commands := map[string]Command{
+		"start": {
+			Name:        "start",
+			Description: "приветствие и краткое объяснение",
+			BuildText: func(_ *tgbotapi.Message) string {
+				return "Привет! Я демонстрационный Telegram‑бот для бизнеса.\n\n" +
+					"Я показываю, как может выглядеть живой продукт для заказчика:\n" +
+					"- приветствие новых клиентов\n" +
+					"- ответы на типовые вопросы\n" +
+					"- сбор заявок прямо в чат\n" +
+					"- простая обратная связь.\n\n" +
+					"Напиши /help, чтобы увидеть, что я уже умею."
+			},
+		},
+		"menu": {
+			Name:        "menu",
+			Description: "показать демо-меню кнопками",
+			BuildText: func(_ *tgbotapi.Message) string {
+				return "Пожалуйста, выберите пункт меню."
+			},
+		},
+		"about": {
+			Name:        "about",
+			Description: "чем полезен такой бот для бизнеса",
+			ParseMode:   tgbotapi.ModeMarkdown,
+			BuildText: func(_ *tgbotapi.Message) string {
+				return "Этот бот — пример того, что вы можете получить как продукт.\n\n" +
+					"Он подходит, если вам нужно:\n" +
+					"- быстро отвечать клиентам 24/7\n" +
+					"- разгрузить менеджеров от типовых вопросов\n" +
+					"- собирать заявки и контакты прямо в Telegram\n" +
+					"- аккуратно подводить людей к покупке или записи.\n\n" +
+					"На основе этого бота можно добавить меню, оплату, интеграцию с CRM, базу знаний и любые сценарии под ваш бизнес."
+			},
+		},
+		"features": {
+			Name:        "features",
+			Description: "какие функции можно добавить (заявки, меню, запись, опросы...)",
+			ParseMode:   tgbotapi.ModeMarkdown,
+			BuildText: func(_ *tgbotapi.Message) string {
+				return "*Какие возможности можно добавить в такого бота:*\n\n" +
+					"- Меню с разделами (услуги, цены, контакты)\n" +
+					"- Приём заявок: имя, телефон, комментарий → вам в чат или CRM\n" +
+					"- Запись на услуги по времени (простое расписание)\n" +
+					"- Опросы и быстрый сбор обратной связи\n" +
+					"- Отправка файлов, инструкций, прайсов\n" +
+					"- Ограниченный доступ по списку клиентов или ролям.\n\n" +
+					"Текущая версия — минимальный живой пример. Все перечисленное можно добавить в этот же бот под ваши задачи."
+			},
+		},
+		"usecases": {
+			Name:        "usecases",
+			Description: "примеры задач, которые можно решить ботом",
+			ParseMode:   tgbotapi.ModeMarkdown,
+			BuildText: func(_ *tgbotapi.Message) string {
+				return renderUseCases()
+			},
+		},
+		"ping": {
+			Name:        "ping",
+			Description: "проверка, что бот онлайн",
+			BuildText: func(_ *tgbotapi.Message) string {
+				return "pong ✅ Бот запущен и готов работать с клиентами."
+			},
+		},
+		"echo": {
+			Name:        "echo",
+			Description: "повторить ваш текст (пример простой команды)",
+			BuildText: func(msg *tgbotapi.Message) string {
+				args := strings.TrimSpace(msg.CommandArguments())
+				if args == "" {
+					return "Использование: /echo <текст, который нужно повторить>"
+				}
+				return args
+			},
+		},
+	}
+
+	commands["help"] = Command{
+		Name:        "help",
+		Description: "это сообщение с возможностями",
+		ParseMode:   tgbotapi.ModeMarkdown,
+		BuildText: func(_ *tgbotapi.Message) string {
+			lines := []string{
+				"Я бот, который помогает автоматизировать общение с клиентами.\n",
+				"*Что я умею прямо сейчас:*",
+			}
+
+			order := []string{"start", "menu", "help", "about", "usecases", "features", "ping", "echo"}
+			for _, name := range order {
+				c := commands[name]
+				label := "/" + c.Name
+				if c.Name == "echo" {
+					label = "/echo <текст>"
+				}
+				lines = append(lines, label+" — "+c.Description)
+			}
+
+			lines = append(lines, "", "Если просто написать сообщение — я отвечу тем же текстом. Это демонстрирует, как бот может принимать и обрабатывать любые обращения клиентов.")
+			return strings.Join(lines, "\n")
+		},
+	}
+
+	return commands
+}
+
+func (h Handlers) HandleMessage(msg *tgbotapi.Message) {
+	chatID := msg.Chat.ID
+
+	if msg.IsCommand() {
+		h.HandleCommand(msg)
+		return
+	}
+
+	if cmdName, ok := commandButtons[strings.TrimSpace(msg.Text)]; ok {
+		h.sendCommandReply(chatID, cmdName, msg)
+		return
+	}
+
+	reply := tgbotapi.NewMessage(chatID, "Ты написал: "+msg.Text)
+	reply.ReplyMarkup = commandKeyboard()
+	if _, err := h.Bot.Send(reply); err != nil {
+		h.Logger.Error("failed to send message", "err", err)
+	}
+}
+
+func (h Handlers) HandleCommand(msg *tgbotapi.Message) {
+	chatID := msg.Chat.ID
+	h.sendCommandReply(chatID, msg.Command(), msg)
+}
+
+func (h Handlers) sendCommandReply(chatID int64, cmdName string, msg *tgbotapi.Message) {
+	cmd, ok := h.commandRegistry()[cmdName]
+	if !ok {
+		reply := tgbotapi.NewMessage(chatID, "Неизвестная команда. Напиши /help, чтобы узнать, что я умею.")
+		reply.ReplyMarkup = commandKeyboard()
+		if _, err := h.Bot.Send(reply); err != nil {
+			h.Logger.Error("failed to send unknown command reply", "err", err)
+		}
+		return
+	}
+
+	reply := tgbotapi.NewMessage(chatID, cmd.BuildText(msg))
+	if cmd.ParseMode != "" {
+		reply.ParseMode = cmd.ParseMode
+	}
+	if cmdName == "menu" {
+		inline := demoInlineMenuKeyboard()
+		reply.ReplyMarkup = &inline
+	} else {
+		reply.ReplyMarkup = commandKeyboard()
+	}
+	if _, err := h.Bot.Send(reply); err != nil {
+		h.Logger.Error("failed to send command reply", "cmd", cmdName, "err", err)
+	}
+}
+
+// HandleCallback — нажатия на inline-кнопки (те же команды, что в основном меню).
+func (h Handlers) HandleCallback(q *tgbotapi.CallbackQuery) {
+	if q == nil || q.Message == nil {
+		return
+	}
+	data := strings.TrimSpace(q.Data)
+	if !strings.HasPrefix(data, "cmd:") {
+		if _, err := h.Bot.Request(tgbotapi.NewCallback(q.ID, "")); err != nil {
+			h.Logger.Error("failed to answer unknown callback", "err", err)
+		}
+		return
+	}
+	cmdName := strings.TrimPrefix(data, "cmd:")
+	if _, err := h.Bot.Request(tgbotapi.NewCallback(q.ID, "")); err != nil {
+		h.Logger.Error("failed to answer callback", "err", err)
+	}
+	fake := &tgbotapi.Message{
+		Chat: q.Message.Chat,
+		From: q.From,
+	}
+	h.sendCommandReply(q.Message.Chat.ID, cmdName, fake)
+}
