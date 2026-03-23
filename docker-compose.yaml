@@ -3,14 +3,15 @@ services:
     image: postgres:16-alpine
     env_file:
       - .env
+    secrets:
+      - postgres_password
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-telegram_bot_pooling_middle}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      # $$ so Compose does not substitute host env; shell inside container expands POSTGRES_* at runtime.
       test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 10s
       timeout: 5s
@@ -25,10 +26,22 @@ services:
       dockerfile: Dockerfile
     env_file:
       - .env
+    secrets:
+      - postgres_password
+    environment:
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_NAME: ${POSTGRES_DB:-telegram_bot_pooling_middle}
+      DB_USER: ${POSTGRES_USER:-postgres}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
     depends_on:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
 
 volumes:
   postgres_data:

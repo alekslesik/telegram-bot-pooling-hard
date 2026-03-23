@@ -23,6 +23,10 @@ vendor/
 .env
 *.env.local
 
+# Docker Compose file secrets (password files); keep directory via secrets/.gitkeep
+/secrets/*
+!/secrets/.gitkeep
+
 # Покрытие тестов (go test -coverprofile / -html)
 coverage.out
 coverage.html

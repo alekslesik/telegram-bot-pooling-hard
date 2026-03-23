@@ -65,8 +65,9 @@ Main variables:
 - `TOKEN` - Telegram bot token.
 - `USERNAME` - bot username (without `@`).
 - `COMPOSE_PROJECT_NAME` - unique compose project name for running multiple bots on one server.
-- `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` - required for Docker Compose Postgres (set `POSTGRES_PASSWORD` to a strong secret in `.env`; do not commit `.env`).
-- `DB_DSN` - PostgreSQL DSN for the bot. If empty, in-memory repository is used. When using Compose, point at the `postgres` service and match `POSTGRES_*` (see [.env.example](.env.example)).
+- `POSTGRES_DB`, `POSTGRES_USER` - database name and user for Compose (see [.env.example](.env.example)).
+- **Postgres password (Compose)** - put a single line in `secrets/postgres_password` (not in git). On deploy, GitHub Actions writes this file from the `VPS_POSTGRES_PASSWORD` secret.
+- `DB_DSN` - optional full DSN for local/non-Compose runs. If unset, the bot builds a DSN from `DB_PASSWORD_FILE` (set automatically in Compose) plus `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`. If neither `DB_DSN` nor `DB_PASSWORD_FILE` is available, the bot uses in-memory storage.
 - `APP_ENV`, `LOG_LEVEL`, `LOG_FORMAT` - runtime options.
 
 ### Database migration
@@ -97,7 +98,7 @@ make docker-run
 make docker-compose-up
 ```
 
-The default [docker-compose.yaml](docker-compose.yaml) starts **PostgreSQL** with a `healthcheck` and starts the **bot only after the database is healthy** (`depends_on: condition: service_healthy`). You must set `POSTGRES_PASSWORD` (and a matching `DB_DSN`) in `.env`; the compose files do not embed default database passwords (see [.env.example](.env.example)).
+The default [docker-compose.yaml](docker-compose.yaml) starts **PostgreSQL** with a `healthcheck` and starts the **bot only after the database is healthy** (`depends_on: condition: service_healthy`). Create **`secrets/postgres_password`** with the DB password (one line, no newline required). Compose mounts it as a [secret](https://docs.docker.com/compose/how-tos/use-secrets/) into Postgres (`POSTGRES_PASSWORD_FILE`) and the bot (`DB_PASSWORD_FILE`). Do not commit that file (see [.gitignore](.gitignore)).
 
 Stop:
 
@@ -121,8 +122,10 @@ Recommended path for this project:
 /opt/bots/telegram-bot-pooling-middle
 ```
 
-Place `.env` in this folder on the server.  
+Place `.env` in this folder on the server (token, username, `POSTGRES_*` names — **not** the DB password).  
 `docker-compose.prod.yaml` is uploaded during release deploy.
+
+The deploy job writes **`secrets/postgres_password`** on the VPS from **`VPS_POSTGRES_PASSWORD`** so the password never lives in the repo.
 
 ### Required GitHub secrets
 
@@ -130,6 +133,7 @@ Place `.env` in this folder on the server.
 - `VPS_USER`
 - `VPS_SSH_KEY`
 - `VPS_APP_PATH` (set to `/opt/bots/telegram-bot-pooling-middle`)
+- `VPS_POSTGRES_PASSWORD` (database password; synced to `secrets/postgres_password` on the server each deploy)
 - `GHCR_READ_USER`
 - `GHCR_READ_TOKEN`
 

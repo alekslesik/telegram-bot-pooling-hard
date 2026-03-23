@@ -12,6 +12,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/alekslesik/telegram-bot-pooling-middle/internal/bot"
+	"github.com/alekslesik/telegram-bot-pooling-middle/internal/dbconfig"
 	"github.com/alekslesik/telegram-bot-pooling-middle/internal/logging"
 	"github.com/alekslesik/telegram-bot-pooling-middle/internal/repository"
 	"github.com/alekslesik/telegram-bot-pooling-middle/internal/service"
@@ -172,9 +173,12 @@ func main() {
 }
 
 func buildBookingRepository(logger slogLogger) (repository.BookingRepository, error) {
-	dsn := strings.TrimSpace(os.Getenv("DB_DSN"))
+	dsn, err := dbconfig.ResolveDSN()
+	if err != nil {
+		return nil, err
+	}
 	if dsn == "" {
-		logger.Info("DB_DSN is empty, using in-memory booking repository")
+		logger.Info("DB_DSN / DB_PASSWORD_FILE not set, using in-memory booking repository")
 		return repository.NewMemoryRepository(), nil
 	}
 
