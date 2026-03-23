@@ -18,7 +18,7 @@ services:
     restart: unless-stopped
 
   bot:
-    image: ${APP_IMAGE:-telegram-bot-simple}
+    image: ${APP_IMAGE:-telegram-bot-pooling-middle}
     build:
       context: .
       dockerfile: Dockerfile

@@ -9,7 +9,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
-	"github.com/alekslesik/telegram-bot-simple/internal/service"
+	"github.com/alekslesik/telegram-bot-pooling-middle/internal/service"
 )
 
 // TelegramClient — минимум для Send и ответа на callback (answerCallbackQuery).

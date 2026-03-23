@@ -11,11 +11,11 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
-	"github.com/alekslesik/telegram-bot-simple/internal/bot"
-	"github.com/alekslesik/telegram-bot-simple/internal/logging"
-	"github.com/alekslesik/telegram-bot-simple/internal/repository"
-	"github.com/alekslesik/telegram-bot-simple/internal/service"
-	"github.com/alekslesik/telegram-bot-simple/internal/telegram"
+	"github.com/alekslesik/telegram-bot-pooling-middle/internal/bot"
+	"github.com/alekslesik/telegram-bot-pooling-middle/internal/logging"
+	"github.com/alekslesik/telegram-bot-pooling-middle/internal/repository"
+	"github.com/alekslesik/telegram-bot-pooling-middle/internal/service"
+	"github.com/alekslesik/telegram-bot-pooling-middle/internal/telegram"
 	_ "github.com/lib/pq"
 )
 

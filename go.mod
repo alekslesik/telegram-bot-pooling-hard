@@ -1,4 +1,4 @@
-module github.com/alekslesik/telegram-bot-simple
+module github.com/alekslesik/telegram-bot-pooling-middle
 
 go 1.26.1
 

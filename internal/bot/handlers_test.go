@@ -10,8 +10,8 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
-	"github.com/alekslesik/telegram-bot-simple/internal/repository"
-	"github.com/alekslesik/telegram-bot-simple/internal/service"
+	"github.com/alekslesik/telegram-bot-pooling-middle/internal/repository"
+	"github.com/alekslesik/telegram-bot-pooling-middle/internal/service"
 )
 
 type fakeBot struct {
