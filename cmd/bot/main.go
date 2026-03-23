@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"log"
 	"os"
 	"os/signal"
@@ -12,7 +13,10 @@ import (
 
 	"github.com/alekslesik/telegram-bot-simple/internal/bot"
 	"github.com/alekslesik/telegram-bot-simple/internal/logging"
+	"github.com/alekslesik/telegram-bot-simple/internal/repository"
+	"github.com/alekslesik/telegram-bot-simple/internal/service"
 	"github.com/alekslesik/telegram-bot-simple/internal/telegram"
+	_ "github.com/lib/pq"
 )
 
 var (
@@ -94,6 +98,8 @@ func longPollTimeoutSeconds() int {
 func setMyCommandsConfig() tgbotapi.SetMyCommandsConfig {
 	return tgbotapi.NewSetMyCommands(
 		tgbotapi.BotCommand{Command: "start", Description: "🚀 Старт"},
+		tgbotapi.BotCommand{Command: "book", Description: "🗓️ Запись на услугу"},
+		tgbotapi.BotCommand{Command: "cancel", Description: "❌ Отменить запись"},
 		tgbotapi.BotCommand{Command: "menu", Description: "📋 Демо-меню"},
 		tgbotapi.BotCommand{Command: "help", Description: "📋 Меню команд"},
 		tgbotapi.BotCommand{Command: "about", Description: "ℹ️ О боте"},
@@ -139,9 +145,16 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
+	bookingRepo, err := buildBookingRepository(logger)
+	if err != nil {
+		log.Fatalf("failed to init booking repository: %v", err)
+	}
+	bookingService := service.NewBookingService(bookingRepo)
+
 	h := bot.Handlers{
-		Bot:    tg,
-		Logger: logger,
+		Bot:     tg,
+		Logger:  logger,
+		Booking: bookingService,
 	}
 
 	logger.Info("bot started with long polling, press Ctrl+C to stop")
@@ -156,4 +169,22 @@ func main() {
 			return
 		}
 	}
+}
+
+func buildBookingRepository(logger slogLogger) (repository.BookingRepository, error) {
+	dsn := strings.TrimSpace(os.Getenv("DB_DSN"))
+	if dsn == "" {
+		logger.Info("DB_DSN is empty, using in-memory booking repository")
+		return repository.NewMemoryRepository(), nil
+	}
+
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Ping(); err != nil {
+		return nil, err
+	}
+	logger.Info("postgres booking repository enabled")
+	return repository.NewPostgresRepository(db), nil
 }

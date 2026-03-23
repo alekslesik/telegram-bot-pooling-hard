@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -8,6 +9,9 @@ import (
 	"testing"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+
+	"github.com/alekslesik/telegram-bot-simple/internal/repository"
+	"github.com/alekslesik/telegram-bot-simple/internal/service"
 )
 
 type fakeBot struct {
@@ -170,8 +174,8 @@ func TestRenderUseCases(t *testing.T) {
 
 func TestDemoInlineMenuKeyboard(t *testing.T) {
 	k := demoInlineMenuKeyboard()
-	if len(k.InlineKeyboard) != 4 {
-		t.Fatalf("expected 4 inline rows, got %d", len(k.InlineKeyboard))
+	if len(k.InlineKeyboard) != 5 {
+		t.Fatalf("expected 5 inline rows, got %d", len(k.InlineKeyboard))
 	}
 }
 
@@ -344,4 +348,22 @@ func TestHandlers_HandleCallback_SendErrorAfterAnswer(t *testing.T) {
 		},
 		Data: "cmd:ping",
 	})
+}
+
+func TestHandlers_BookingFlow(t *testing.T) {
+	fb := &fakeBot{}
+	repo := repository.NewMemoryRepository()
+	h := newTestHandlers(fb)
+	h.Booking = service.NewBookingService(repo)
+
+	h.HandleCommand(commandMessage(1, "/book", 5))
+	cfg, ok := fb.last.(tgbotapi.MessageConfig)
+	if !ok || !strings.Contains(cfg.Text, "Choose a service") {
+		t.Fatalf("unexpected /book response: %T %+v", fb.last, cfg)
+	}
+
+	handled, msg, err := h.Booking.HandleText(context.Background(), 1, "1")
+	if err != nil || !handled || !strings.Contains(msg, "Choose a slot") {
+		t.Fatalf("step service selection failed: handled=%v err=%v msg=%q", handled, err, msg)
+	}
 }

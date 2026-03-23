@@ -33,7 +33,16 @@ Build a medium-complexity Telegram bot for service appointments.
 ## Current Repository Status
 
 The project already includes a base Go bot scaffold, tests, Docker packaging, and CI/CD workflows.  
-The next iterations should implement Level 2 business features on top of this foundation.
+The repository now includes an MVP booking wizard with persistent conversation state.
+
+### Implemented MVP Wizard Flow
+
+- `/book` starts a finite-state booking flow.
+- User selects service by number.
+- User selects available slot by number.
+- User confirms with `YES` (or cancels with `NO` / `/cancel`).
+- Booking is persisted and slot is marked unavailable.
+- Conversation state is stored in repository (`conversation_states`) to survive bot restarts.
 
 ## Development Setup
 
@@ -56,7 +65,12 @@ Main variables:
 - `TOKEN` - Telegram bot token.
 - `USERNAME` - bot username (without `@`).
 - `COMPOSE_PROJECT_NAME` - unique compose project name for running multiple bots on one server.
+- `DB_DSN` - PostgreSQL DSN for persistent booking/state storage. If empty, in-memory repository is used.
 - `APP_ENV`, `LOG_LEVEL`, `LOG_FORMAT` - runtime options.
+
+### Database migration
+
+Apply SQL migrations from [migrations](migrations) before running with PostgreSQL.
 
 ### Run locally
 
