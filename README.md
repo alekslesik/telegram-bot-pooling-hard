@@ -96,6 +96,8 @@ make docker-run
 make docker-compose-up
 ```
 
+The default [docker-compose.yaml](docker-compose.yaml) starts **PostgreSQL** with a `healthcheck` and starts the **bot only after the database is healthy** (`depends_on: condition: service_healthy`). Set `DB_DSN` in `.env` to point at the `postgres` service host (see [.env.example](.env.example)).
+
 Stop:
 
 ```bash
