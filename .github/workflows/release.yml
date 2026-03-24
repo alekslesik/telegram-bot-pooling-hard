@@ -85,6 +85,16 @@ jobs:
           target: ${{ secrets.VPS_APP_PATH }}
           overwrite: true
 
+      - name: Upload migrations
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: migrations/*
+          target: ${{ secrets.VPS_APP_PATH }}
+          overwrite: true
+
       - name: Deploy to VPS
         uses: appleboy/ssh-action@v1.2.0
         env:
@@ -104,8 +114,22 @@ jobs:
             chmod 600 secrets/postgres_password
             echo "${{ secrets.GHCR_READ_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_READ_USER }}" --password-stdin
             IMAGE_TAG="${IMAGE_TAG}" docker compose -f docker-compose.prod.yaml pull
-            IMAGE_TAG="${IMAGE_TAG}" docker compose -f docker-compose.prod.yaml up -d
+            IMAGE_TAG="${IMAGE_TAG}" docker compose -f docker-compose.prod.yaml up -d postgres
+            echo "Waiting for postgres to be healthy..."
+            for _ in $(seq 1 30); do
+              if [ "$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' telegram-bot-pooling-middle-postgres-1 2>/dev/null || echo starting)" = "healthy" ]; then
+                break
+              fi
+              sleep 2
+            done
+            for migration in migrations/*.sql; do
+              [ -f "$migration" ] || continue
+              echo "Applying migration: $migration"
+              docker compose -f docker-compose.prod.yaml exec -T postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' < "$migration"
+            done
+            IMAGE_TAG="${IMAGE_TAG}" docker compose -f docker-compose.prod.yaml up -d bot
             sleep 10
             docker ps
+            docker compose -f docker-compose.prod.yaml logs --no-color --tail=100 postgres
             docker compose -f docker-compose.prod.yaml logs --no-color --tail=100 bot
             docker image prune -f
