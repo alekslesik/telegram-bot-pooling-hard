@@ -1,0 +1,7 @@
+services:
+  bot:
+    image: ghcr.io/alekslesik/telegram-bot-pooling-middle:${IMAGE_TAG:-latest}
+    env_file:
+      - .env
+    restart: unless-stopped
+

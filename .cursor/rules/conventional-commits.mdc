@@ -1,0 +1,33 @@
+---
+description: Git commit messages must follow Conventional Commits
+alwaysApply: true
+---
+
+# Conventional Commits
+
+When creating commits in this repository, use [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
+
+## Format
+
+```
+<type>(<optional scope>): <short description in imperative mood>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+- **Type** (English, lowercase): `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`.
+- **Scope** (optional): area, e.g. `bot`, `docker`, `makefile`, `deps`.
+- **Description**: imperative, no period at the end; Russian or English is fine; keep the line under ~72 characters when practical.
+
+## Examples
+
+- `feat(bot): add /start reply handler`
+- `fix(docker): correct env file path in compose`
+- `chore(deps): bump Go to 1.26.1`
+- `ci: run preprod on pull requests`
+
+## Breaking changes
+
+Add `BREAKING CHANGE:` in the footer or append `!` after type/scope, e.g. `feat(api)!: drop legacy webhook format`.
