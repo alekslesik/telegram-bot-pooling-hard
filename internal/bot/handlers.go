@@ -2,11 +2,14 @@ package bot
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"strings"
 	"text/template"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+
+	"github.com/alekslesik/telegram-bot-pooling-middle/internal/service"
 )
 
 // TelegramClient — минимум для Send и ответа на callback (answerCallbackQuery).
@@ -16,8 +19,9 @@ type TelegramClient interface {
 }
 
 type Handlers struct {
-	Bot    TelegramClient
-	Logger *slog.Logger
+	Bot     TelegramClient
+	Logger  *slog.Logger
+	Booking *service.BookingService
 }
 
 type Command struct {
@@ -34,6 +38,7 @@ type UseCaseCategory struct {
 
 var commandButtons = map[string]string{
 	"🚀 Старт":            "start",
+	"🗓️ Записаться":      "book",
 	"📋 Демо-меню":        "menu",
 	"🆘 Помощь":           "help",
 	"ℹ️ О боте":          "about",
@@ -48,18 +53,21 @@ func demoInlineMenuKeyboard() tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🚀 Старт", "cmd:start"),
+			tgbotapi.NewInlineKeyboardButtonData("🗓️ Записаться", "cmd:book"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("📋 Демо-меню", "cmd:menu"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🆘 Помощь", "cmd:help"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("ℹ️ О боте", "cmd:about"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("💼 Примеры задач", "cmd:usecases"),
-			tgbotapi.NewInlineKeyboardButtonData("🧩 Возможности", "cmd:features"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🧩 Возможности", "cmd:features"),
 			tgbotapi.NewInlineKeyboardButtonData("✅ Проверка статуса", "cmd:ping"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🗣️ Повторить текст", "cmd:echo"),
 		),
 	)
@@ -69,18 +77,21 @@ func commandKeyboard() tgbotapi.ReplyKeyboardMarkup {
 	return tgbotapi.NewReplyKeyboard(
 		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("🚀 Старт"),
+			tgbotapi.NewKeyboardButton("🗓️ Записаться"),
+		),
+		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("📋 Демо-меню"),
-		),
-		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("🆘 Помощь"),
+		),
+		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("ℹ️ О боте"),
-		),
-		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("💼 Примеры задач"),
-			tgbotapi.NewKeyboardButton("🧩 Возможности"),
 		),
 		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("🧩 Возможности"),
 			tgbotapi.NewKeyboardButton("✅ Проверка статуса"),
+		),
+		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("🗣️ Повторить текст"),
 		),
 	)
@@ -147,6 +158,13 @@ func (h Handlers) commandRegistry() map[string]Command {
 					"- сбор заявок прямо в чат\n" +
 					"- простая обратная связь.\n\n" +
 					"Напиши /help, чтобы увидеть, что я уже умею."
+			},
+		},
+		"book": {
+			Name:        "book",
+			Description: "начать запись на услугу (wizard)",
+			BuildText: func(_ *tgbotapi.Message) string {
+				return "Starting booking flow..."
 			},
 		},
 		"menu": {
@@ -223,7 +241,7 @@ func (h Handlers) commandRegistry() map[string]Command {
 				"*Что я умею прямо сейчас:*",
 			}
 
-			order := []string{"start", "menu", "help", "about", "usecases", "features", "ping", "echo"}
+			order := []string{"start", "book", "menu", "help", "about", "usecases", "features", "ping", "echo"}
 			for _, name := range order {
 				c := commands[name]
 				label := "/" + c.Name
@@ -233,6 +251,7 @@ func (h Handlers) commandRegistry() map[string]Command {
 				lines = append(lines, label+" — "+c.Description)
 			}
 
+			lines = append(lines, "/cancel — отменить активный сценарий записи")
 			lines = append(lines, "", "Если просто написать сообщение — я отвечу тем же текстом. Это демонстрирует, как бот может принимать и обрабатывать любые обращения клиентов.")
 			return strings.Join(lines, "\n")
 		},
@@ -254,6 +273,21 @@ func (h Handlers) HandleMessage(msg *tgbotapi.Message) {
 		return
 	}
 
+	if h.Booking != nil {
+		handled, replyText, err := h.Booking.HandleText(context.Background(), telegramUserID(msg), msg.Text)
+		if err != nil {
+			h.Logger.Error("booking flow failed", "err", err)
+		}
+		if handled {
+			reply := tgbotapi.NewMessage(chatID, replyText)
+			reply.ReplyMarkup = commandKeyboard()
+			if _, err := h.Bot.Send(reply); err != nil {
+				h.Logger.Error("failed to send booking reply", "err", err)
+			}
+			return
+		}
+	}
+
 	reply := tgbotapi.NewMessage(chatID, "Ты написал: "+msg.Text)
 	reply.ReplyMarkup = commandKeyboard()
 	if _, err := h.Bot.Send(reply); err != nil {
@@ -267,6 +301,28 @@ func (h Handlers) HandleCommand(msg *tgbotapi.Message) {
 }
 
 func (h Handlers) sendCommandReply(chatID int64, cmdName string, msg *tgbotapi.Message) {
+	if h.Booking != nil && (cmdName == "book" || cmdName == "cancel") {
+		var (
+			replyText string
+			err       error
+		)
+		if cmdName == "book" {
+			replyText, err = h.Booking.Start(context.Background(), telegramUserID(msg))
+		} else {
+			replyText, err = h.Booking.Cancel(context.Background(), telegramUserID(msg))
+		}
+		if err != nil {
+			h.Logger.Error("booking command failed", "cmd", cmdName, "err", err)
+			replyText = "Booking command failed. Please try again."
+		}
+		reply := tgbotapi.NewMessage(chatID, replyText)
+		reply.ReplyMarkup = commandKeyboard()
+		if _, err := h.Bot.Send(reply); err != nil {
+			h.Logger.Error("failed to send booking command reply", "cmd", cmdName, "err", err)
+		}
+		return
+	}
+
 	cmd, ok := h.commandRegistry()[cmdName]
 	if !ok {
 		reply := tgbotapi.NewMessage(chatID, "Неизвестная команда. Напиши /help, чтобы узнать, что я умею.")
@@ -290,6 +346,16 @@ func (h Handlers) sendCommandReply(chatID int64, cmdName string, msg *tgbotapi.M
 	if _, err := h.Bot.Send(reply); err != nil {
 		h.Logger.Error("failed to send command reply", "cmd", cmdName, "err", err)
 	}
+}
+
+func telegramUserID(msg *tgbotapi.Message) int64 {
+	if msg != nil && msg.From != nil {
+		return msg.From.ID
+	}
+	if msg != nil && msg.Chat != nil {
+		return msg.Chat.ID
+	}
+	return 0
 }
 
 // HandleCallback — нажатия на inline-кнопки (те же команды, что в основном меню).

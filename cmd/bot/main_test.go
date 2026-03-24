@@ -8,8 +8,8 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
-	"github.com/alekslesik/telegram-bot-simple/internal/bot"
-	"github.com/alekslesik/telegram-bot-simple/internal/logging"
+	"github.com/alekslesik/telegram-bot-pooling-middle/internal/bot"
+	"github.com/alekslesik/telegram-bot-pooling-middle/internal/logging"
 )
 
 func TestFormatBuildDate_RFC3339(t *testing.T) {
@@ -51,8 +51,8 @@ func TestFormatBuildDate_loadLocationFails(t *testing.T) {
 func TestSetMyCommandsConfig(t *testing.T) {
 	cfg := setMyCommandsConfig()
 	cmds := cfg.Commands
-	if len(cmds) != 8 {
-		t.Fatalf("expected 8 commands, got %d", len(cmds))
+	if len(cmds) != 10 {
+		t.Fatalf("expected 10 commands, got %d", len(cmds))
 	}
 	if cmds[0].Command != "start" {
 		t.Fatalf("first command: %+v", cmds[0])

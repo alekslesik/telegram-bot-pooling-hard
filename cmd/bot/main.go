@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"log"
 	"os"
 	"os/signal"
@@ -10,9 +11,13 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
-	"github.com/alekslesik/telegram-bot-simple/internal/bot"
-	"github.com/alekslesik/telegram-bot-simple/internal/logging"
-	"github.com/alekslesik/telegram-bot-simple/internal/telegram"
+	"github.com/alekslesik/telegram-bot-pooling-middle/internal/bot"
+	"github.com/alekslesik/telegram-bot-pooling-middle/internal/dbconfig"
+	"github.com/alekslesik/telegram-bot-pooling-middle/internal/logging"
+	"github.com/alekslesik/telegram-bot-pooling-middle/internal/repository"
+	"github.com/alekslesik/telegram-bot-pooling-middle/internal/service"
+	"github.com/alekslesik/telegram-bot-pooling-middle/internal/telegram"
+	_ "github.com/lib/pq"
 )
 
 var (
@@ -94,6 +99,8 @@ func longPollTimeoutSeconds() int {
 func setMyCommandsConfig() tgbotapi.SetMyCommandsConfig {
 	return tgbotapi.NewSetMyCommands(
 		tgbotapi.BotCommand{Command: "start", Description: "🚀 Старт"},
+		tgbotapi.BotCommand{Command: "book", Description: "🗓️ Запись на услугу"},
+		tgbotapi.BotCommand{Command: "cancel", Description: "❌ Отменить запись"},
 		tgbotapi.BotCommand{Command: "menu", Description: "📋 Демо-меню"},
 		tgbotapi.BotCommand{Command: "help", Description: "📋 Меню команд"},
 		tgbotapi.BotCommand{Command: "about", Description: "ℹ️ О боте"},
@@ -139,9 +146,16 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
+	bookingRepo, err := buildBookingRepository(logger)
+	if err != nil {
+		log.Fatalf("failed to init booking repository: %v", err)
+	}
+	bookingService := service.NewBookingService(bookingRepo)
+
 	h := bot.Handlers{
-		Bot:    tg,
-		Logger: logger,
+		Bot:     tg,
+		Logger:  logger,
+		Booking: bookingService,
 	}
 
 	logger.Info("bot started with long polling, press Ctrl+C to stop")
@@ -156,4 +170,25 @@ func main() {
 			return
 		}
 	}
+}
+
+func buildBookingRepository(logger slogLogger) (repository.BookingRepository, error) {
+	dsn, err := dbconfig.ResolveDSN()
+	if err != nil {
+		return nil, err
+	}
+	if dsn == "" {
+		logger.Info("DB_DSN / DB_PASSWORD_FILE not set, using in-memory booking repository")
+		return repository.NewMemoryRepository(), nil
+	}
+
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Ping(); err != nil {
+		return nil, err
+	}
+	logger.Info("postgres booking repository enabled")
+	return repository.NewPostgresRepository(db), nil
 }
