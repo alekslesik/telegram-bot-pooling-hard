@@ -18,11 +18,27 @@ func TestBookingService_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start error: %v", err)
 	}
-	if !strings.Contains(start, "Choose a service") {
+	if !strings.Contains(start, "full name") {
 		t.Fatalf("unexpected start text: %q", start)
 	}
 
-	handled, msg, err := svc.HandleText(ctx, userID, "1")
+	handled, msg, err := svc.HandleText(ctx, userID, "Ivan Ivanov")
+	if err != nil || !handled {
+		t.Fatalf("name step failed: handled=%v err=%v", handled, err)
+	}
+	if !strings.Contains(msg, "phone number") {
+		t.Fatalf("unexpected phone prompt: %q", msg)
+	}
+
+	handled, msg, err = svc.HandleText(ctx, userID, "+79991234567")
+	if err != nil || !handled {
+		t.Fatalf("phone step failed: handled=%v err=%v", handled, err)
+	}
+	if !strings.Contains(msg, "Choose a service") {
+		t.Fatalf("unexpected service prompt: %q", msg)
+	}
+
+	handled, msg, err = svc.HandleText(ctx, userID, "1")
 	if err != nil || !handled {
 		t.Fatalf("service selection failed: handled=%v err=%v", handled, err)
 	}
@@ -56,6 +72,12 @@ func TestBookingService_StatePersistenceAcrossServiceInstances(t *testing.T) {
 	if _, err := svc1.Start(ctx, userID); err != nil {
 		t.Fatalf("start error: %v", err)
 	}
+	if _, _, err := svc1.HandleText(ctx, userID, "Ivan Ivanov"); err != nil {
+		t.Fatalf("name step error: %v", err)
+	}
+	if _, _, err := svc1.HandleText(ctx, userID, "+79991234567"); err != nil {
+		t.Fatalf("phone step error: %v", err)
+	}
 	if _, _, err := svc1.HandleText(ctx, userID, "1"); err != nil {
 		t.Fatalf("service selection error: %v", err)
 	}
@@ -85,5 +107,27 @@ func TestBookingService_Cancel(t *testing.T) {
 	}
 	if !strings.Contains(msg, "cancelled") {
 		t.Fatalf("unexpected cancel text: %q", msg)
+	}
+}
+
+func TestBookingService_RegisteredClientSkipsRegistration(t *testing.T) {
+	repo := repository.NewMemoryRepository()
+	svc := NewBookingService(repo)
+	ctx := context.Background()
+	const userID int64 = 123
+
+	if _, err := repo.UpsertClient(ctx, repository.Client{
+		TelegramUserID: userID,
+		FullName:       "John Doe",
+		Phone:          "+12345678901",
+	}); err != nil {
+		t.Fatalf("upsert client error: %v", err)
+	}
+	start, err := svc.Start(ctx, userID)
+	if err != nil {
+		t.Fatalf("start error: %v", err)
+	}
+	if !strings.Contains(start, "Choose a service") {
+		t.Fatalf("registered client should skip registration, got %q", start)
 	}
 }
