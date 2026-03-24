@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -12,15 +13,21 @@ import (
 )
 
 const (
+	StateWaitingName    = "waiting_name"
+	StateWaitingPhone   = "waiting_phone"
 	StateWaitingService = "waiting_service"
 	StateWaitingSlot    = "waiting_slot"
 	StateWaitingConfirm = "waiting_confirm"
 )
 
 type statePayload struct {
-	ServiceID int64 `json:"service_id"`
-	SlotID    int64 `json:"slot_id"`
+	FullName  string `json:"full_name"`
+	Phone     string `json:"phone"`
+	ServiceID int64  `json:"service_id"`
+	SlotID    int64  `json:"slot_id"`
 }
+
+var phoneCleaner = regexp.MustCompile(`[^0-9+]`)
 
 type BookingService struct {
 	repo repository.BookingRepository
@@ -31,6 +38,25 @@ func NewBookingService(repo repository.BookingRepository) *BookingService {
 }
 
 func (s *BookingService) Start(ctx context.Context, userID int64) (string, error) {
+	client, err := s.repo.GetClientByUserID(ctx, userID)
+	switch {
+	case err == nil:
+		if strings.TrimSpace(client.FullName) != "" && strings.TrimSpace(client.Phone) != "" {
+			return s.startServiceSelection(ctx, userID, statePayload{
+				FullName: client.FullName,
+				Phone:    client.Phone,
+			})
+		}
+	case err != repository.ErrNotFound:
+		return "", err
+	}
+	if err := s.saveState(ctx, userID, StateWaitingName, statePayload{}); err != nil {
+		return "", err
+	}
+	return "Welcome! Before booking, please enter your full name.", nil
+}
+
+func (s *BookingService) startServiceSelection(ctx context.Context, userID int64, payload statePayload) (string, error) {
 	services, err := s.repo.ListActiveServices(ctx)
 	if err != nil {
 		return "", err
@@ -38,10 +64,9 @@ func (s *BookingService) Start(ctx context.Context, userID int64) (string, error
 	if len(services) == 0 {
 		return "No services available right now. Please try again later.", nil
 	}
-	if err := s.saveState(ctx, userID, StateWaitingService, statePayload{}); err != nil {
+	if err := s.saveState(ctx, userID, StateWaitingService, payload); err != nil {
 		return "", err
 	}
-
 	var b strings.Builder
 	b.WriteString("Choose a service by number:\n")
 	for i, srv := range services {
@@ -68,6 +93,10 @@ func (s *BookingService) HandleText(ctx context.Context, userID int64, text stri
 	}
 
 	switch state {
+	case StateWaitingName:
+		return s.handleNameInput(ctx, userID, payload, text)
+	case StateWaitingPhone:
+		return s.handlePhoneInput(ctx, userID, payload, text)
 	case StateWaitingService:
 		return s.handleServiceSelection(ctx, userID, payload, text)
 	case StateWaitingSlot:
@@ -77,6 +106,35 @@ func (s *BookingService) HandleText(ctx context.Context, userID int64, text stri
 	default:
 		return false, "", nil
 	}
+}
+
+func (s *BookingService) handleNameInput(ctx context.Context, userID int64, payload statePayload, text string) (bool, string, error) {
+	name := strings.TrimSpace(text)
+	if len(name) < 2 {
+		return true, "Please enter a valid full name (at least 2 characters).", nil
+	}
+	payload.FullName = name
+	if err := s.saveState(ctx, userID, StateWaitingPhone, payload); err != nil {
+		return true, "", err
+	}
+	return true, "Great. Now send your phone number in international format, for example: +79991234567", nil
+}
+
+func (s *BookingService) handlePhoneInput(ctx context.Context, userID int64, payload statePayload, text string) (bool, string, error) {
+	phone := normalizePhone(text)
+	if !looksLikePhone(phone) {
+		return true, "Please send a valid phone number, for example: +79991234567", nil
+	}
+	payload.Phone = phone
+	if _, err := s.repo.UpsertClient(ctx, repository.Client{
+		TelegramUserID: userID,
+		FullName:       payload.FullName,
+		Phone:          payload.Phone,
+	}); err != nil {
+		return true, "", err
+	}
+	reply, err := s.startServiceSelection(ctx, userID, payload)
+	return true, reply, err
 }
 
 func (s *BookingService) handleServiceSelection(ctx context.Context, userID int64, payload statePayload, text string) (bool, string, error) {
@@ -137,7 +195,9 @@ func (s *BookingService) handleSlotSelection(ctx context.Context, userID int64, 
 		return true, "", err
 	}
 	return true, fmt.Sprintf(
-		"Confirm booking:\nService: %s\nSlot: %s\n\nReply YES to confirm or NO to cancel.",
+		"Confirm booking:\nName: %s\nPhone: %s\nService: %s\nSlot: %s\n\nReply YES to confirm or NO to cancel.",
+		payload.FullName,
+		payload.Phone,
 		service.Name,
 		selectedSlot.StartAt.Format("2006-01-02 15:04"),
 	), nil
@@ -201,4 +261,28 @@ func (s *BookingService) saveState(ctx context.Context, userID int64, state stri
 		PayloadJSON:    string(raw),
 		UpdatedAt:      time.Now().UTC(),
 	})
+}
+
+func normalizePhone(raw string) string {
+	s := phoneCleaner.ReplaceAllString(strings.TrimSpace(raw), "")
+	if strings.HasPrefix(s, "8") && len(s) == 11 {
+		return "+7" + s[1:]
+	}
+	if strings.HasPrefix(s, "7") && len(s) == 11 {
+		return "+" + s
+	}
+	return s
+}
+
+func looksLikePhone(phone string) bool {
+	phone = strings.TrimPrefix(phone, "+")
+	if len(phone) < 10 || len(phone) > 15 {
+		return false
+	}
+	for _, ch := range phone {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
 }

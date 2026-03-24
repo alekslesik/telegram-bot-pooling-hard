@@ -73,3 +73,29 @@ func TestMemoryRepository_BookingLifecycle(t *testing.T) {
 		t.Fatal("slot should be unavailable")
 	}
 }
+
+func TestMemoryRepository_ClientUpsertAndGet(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	const userID int64 = 99
+
+	client, err := repo.UpsertClient(ctx, Client{
+		TelegramUserID: userID,
+		FullName:       "Jane Doe",
+		Phone:          "+79990001122",
+	})
+	if err != nil {
+		t.Fatalf("upsert error: %v", err)
+	}
+	if client.TelegramUserID != userID {
+		t.Fatalf("unexpected user id: %d", client.TelegramUserID)
+	}
+
+	got, err := repo.GetClientByUserID(ctx, userID)
+	if err != nil {
+		t.Fatalf("get client error: %v", err)
+	}
+	if got.FullName != "Jane Doe" || got.Phone != "+79990001122" {
+		t.Fatalf("unexpected client data: %+v", got)
+	}
+}

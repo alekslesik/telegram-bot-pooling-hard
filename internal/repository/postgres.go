@@ -83,6 +83,33 @@ func (r *PostgresRepository) GetSlotByID(ctx context.Context, slotID int64) (Slo
 	return s, err
 }
 
+func (r *PostgresRepository) GetClientByUserID(ctx context.Context, userID int64) (Client, error) {
+	var c Client
+	err := r.db.QueryRowContext(ctx, `
+		SELECT telegram_user_id, full_name, phone, created_at, updated_at
+		FROM clients
+		WHERE telegram_user_id = $1`, userID).
+		Scan(&c.TelegramUserID, &c.FullName, &c.Phone, &c.CreatedAt, &c.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Client{}, ErrNotFound
+	}
+	return c, err
+}
+
+func (r *PostgresRepository) UpsertClient(ctx context.Context, client Client) (Client, error) {
+	err := r.db.QueryRowContext(ctx, `
+		INSERT INTO clients (telegram_user_id, full_name, phone)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (telegram_user_id) DO UPDATE
+		SET full_name = EXCLUDED.full_name,
+		    phone = EXCLUDED.phone,
+		    updated_at = NOW()
+		RETURNING telegram_user_id, full_name, phone, created_at, updated_at`,
+		client.TelegramUserID, client.FullName, client.Phone,
+	).Scan(&client.TelegramUserID, &client.FullName, &client.Phone, &client.CreatedAt, &client.UpdatedAt)
+	return client, err
+}
+
 func (r *PostgresRepository) CreateBooking(ctx context.Context, booking Booking) (Booking, error) {
 	err := r.db.QueryRowContext(ctx, `
 		INSERT INTO bookings (telegram_user_id, service_id, slot_id, status)

@@ -40,11 +40,21 @@ type ConversationState struct {
 	UpdatedAt      time.Time
 }
 
+type Client struct {
+	TelegramUserID int64
+	FullName       string
+	Phone          string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
 type BookingRepository interface {
 	ListActiveServices(ctx context.Context) ([]Service, error)
 	GetServiceByID(ctx context.Context, serviceID int64) (Service, error)
 	ListAvailableSlots(ctx context.Context, serviceID int64) ([]Slot, error)
 	GetSlotByID(ctx context.Context, slotID int64) (Slot, error)
+	GetClientByUserID(ctx context.Context, userID int64) (Client, error)
+	UpsertClient(ctx context.Context, client Client) (Client, error)
 	CreateBooking(ctx context.Context, booking Booking) (Booking, error)
 	MarkSlotUnavailable(ctx context.Context, slotID int64) error
 	GetConversationState(ctx context.Context, userID int64) (ConversationState, error)
@@ -58,6 +68,7 @@ type MemoryRepository struct {
 	slots         map[int64]Slot
 	bookings      map[int64]Booking
 	states        map[int64]ConversationState
+	clients       map[int64]Client
 	nextBookingID int64
 	nextServiceID int64
 	nextSlotID    int64
@@ -69,6 +80,7 @@ func NewMemoryRepository() *MemoryRepository {
 		slots:         make(map[int64]Slot),
 		bookings:      make(map[int64]Booking),
 		states:        make(map[int64]ConversationState),
+		clients:       make(map[int64]Client),
 		nextBookingID: 1,
 		nextServiceID: 1,
 		nextSlotID:    1,
@@ -185,6 +197,36 @@ func (r *MemoryRepository) GetConversationState(_ context.Context, userID int64)
 		return ConversationState{}, ErrNotFound
 	}
 	return state, nil
+}
+
+func (r *MemoryRepository) GetClientByUserID(_ context.Context, userID int64) (Client, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	client, ok := r.clients[userID]
+	if !ok {
+		return Client{}, ErrNotFound
+	}
+	return client, nil
+}
+
+func (r *MemoryRepository) UpsertClient(_ context.Context, client Client) (Client, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now().UTC()
+	existing, ok := r.clients[client.TelegramUserID]
+	if ok {
+		existing.FullName = client.FullName
+		existing.Phone = client.Phone
+		existing.UpdatedAt = now
+		r.clients[client.TelegramUserID] = existing
+		return existing, nil
+	}
+	if client.CreatedAt.IsZero() {
+		client.CreatedAt = now
+	}
+	client.UpdatedAt = now
+	r.clients[client.TelegramUserID] = client
+	return client, nil
 }
 
 func (r *MemoryRepository) SaveConversationState(_ context.Context, state ConversationState) error {
