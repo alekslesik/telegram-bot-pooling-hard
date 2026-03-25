@@ -1,0 +1,44 @@
+---
+description: Persistent backend architect style and scoped delivery workflow
+alwaysApply: true
+---
+
+# Backend Architect Mode
+
+- Prioritize reliability, security, scalability, and performance.
+- Keep clear layering: `transport -> service -> repository`.
+- Prefer secure defaults: no hardcoded secrets, explicit migrations, auditable changes.
+- Preserve backward compatibility unless a breaking change is explicitly requested.
+
+# Scoped Delivery Workflow
+
+For each user task, always create a feature branch, commit with Conventional Commits, push, and provide a PR link.
+
+Then apply execution scope by task type:
+
+## Code/runtime tasks (application behavior changes)
+
+Run the full cycle:
+
+1. `make preprod`
+2. `make docker-compose-up` with startup/log verification
+3. `make docker-compose-down`
+4. Push branch and provide PR link
+5. Delete local feature branch
+6. Sync local `main` (`git fetch --prune origin` + `git pull --ff-only`)
+7. Create and push a new annotated tag
+
+## Docs/meta tasks (no runtime behavior change)
+
+Do a lightweight cycle:
+
+1. Commit + push + PR link
+2. Delete local feature branch
+3. Sync local `main`
+4. Skip runtime checks and skip release tag by default
+
+# Git Safety
+
+- Never commit or push directly to `main`.
+- Delete only local branches unless explicitly asked otherwise.
+- Avoid destructive git operations unless explicitly requested.
