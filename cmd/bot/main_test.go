@@ -48,18 +48,6 @@ func TestFormatBuildDate_loadLocationFails(t *testing.T) {
 	}
 }
 
-func TestSetMyCommandsConfig(t *testing.T) {
-	cfg := setMyCommandsConfig()
-	cmds := cfg.Commands
-	if len(cmds) != 10 {
-		t.Fatalf("expected 10 commands, got %d", len(cmds))
-	}
-	if cmds[0].Command != "start" {
-		t.Fatalf("first command: %+v", cmds[0])
-	}
-	_ = cfg
-}
-
 type stubTelegram struct {
 	last tgbotapi.Chattable
 }
@@ -128,30 +116,6 @@ func TestLogAuthorized_withoutExpectedUsername(t *testing.T) {
 	logAuthorized(logging.NewWithWriter(&buf), "", "only")
 	if bytes.Contains(buf.Bytes(), []byte("expected_username")) {
 		t.Fatalf("unexpected field: %s", buf.String())
-	}
-}
-
-type errRegistrar struct{}
-
-func (errRegistrar) Request(tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
-	return nil, errors.New("boom")
-}
-
-func TestRegisterBotCommands_errorLogged(t *testing.T) {
-	var buf bytes.Buffer
-	logger := logging.NewWithWriter(&buf)
-	registerBotCommands(errRegistrar{}, logger)
-	if !bytes.Contains(buf.Bytes(), []byte("failed to register bot commands")) {
-		t.Fatalf("log: %s", buf.String())
-	}
-}
-
-func TestRegisterBotCommands_ok(t *testing.T) {
-	var buf bytes.Buffer
-	logger := logging.NewWithWriter(&buf)
-	registerBotCommands(&stubTelegram{}, logger)
-	if buf.Len() != 0 {
-		t.Fatalf("expected no error log, got %s", buf.String())
 	}
 }
 

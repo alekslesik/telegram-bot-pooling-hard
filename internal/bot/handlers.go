@@ -37,15 +37,9 @@ type UseCaseCategory struct {
 }
 
 var commandButtons = map[string]string{
-	"🚀 Старт":            "start",
-	"🗓️ Записаться":      "book",
-	"📋 Демо-меню":        "menu",
-	"🆘 Помощь":           "help",
-	"ℹ️ О боте":          "about",
-	"💼 Примеры задач":    "usecases",
-	"🧩 Возможности":      "features",
-	"✅ Проверка статуса": "ping",
-	"🗣️ Повторить текст": "echo",
+	"🚀 Старт":       "start",
+	"🗓️ Записаться": "book",
+	"🆘 Помощь":      "help",
 }
 
 // demoInlineMenuKeyboard — те же пункты, что reply-клавиатура и меню у поля ввода.
@@ -80,19 +74,7 @@ func commandKeyboard() tgbotapi.ReplyKeyboardMarkup {
 			tgbotapi.NewKeyboardButton("🗓️ Записаться"),
 		),
 		tgbotapi.NewKeyboardButtonRow(
-			tgbotapi.NewKeyboardButton("📋 Демо-меню"),
 			tgbotapi.NewKeyboardButton("🆘 Помощь"),
-		),
-		tgbotapi.NewKeyboardButtonRow(
-			tgbotapi.NewKeyboardButton("ℹ️ О боте"),
-			tgbotapi.NewKeyboardButton("💼 Примеры задач"),
-		),
-		tgbotapi.NewKeyboardButtonRow(
-			tgbotapi.NewKeyboardButton("🧩 Возможности"),
-			tgbotapi.NewKeyboardButton("✅ Проверка статуса"),
-		),
-		tgbotapi.NewKeyboardButtonRow(
-			tgbotapi.NewKeyboardButton("🗣️ Повторить текст"),
 		),
 	)
 }
@@ -149,15 +131,17 @@ func (h Handlers) commandRegistry() map[string]Command {
 	commands := map[string]Command{
 		"start": {
 			Name:        "start",
-			Description: "приветствие и краткое объяснение",
+			Description: "приветствие и сценарии для сервиса записи",
 			BuildText: func(_ *tgbotapi.Message) string {
-				return "Привет! Я демонстрационный Telegram‑бот для бизнеса.\n\n" +
-					"Я показываю, как может выглядеть живой продукт для заказчика:\n" +
-					"- приветствие новых клиентов\n" +
-					"- ответы на типовые вопросы\n" +
-					"- сбор заявок прямо в чат\n" +
-					"- простая обратная связь.\n\n" +
-					"Напиши /help, чтобы увидеть, что я уже умею."
+				return "Привет! Я бот для сервисов с записью на прием.\n\n" +
+					"Подходит для демонстрации клиники, частного кабинета, салона, студии, консультаций и других услуг по времени.\n\n" +
+					"Что умеет эта версия:\n" +
+					"- регистрация клиента\n" +
+					"- запись на прием\n" +
+					"- отмена записи\n" +
+					"- просмотр моих записей\n" +
+					"- загрузка документов.\n\n" +
+					"Нажми «🗓️ Записаться» или используй /book."
 			},
 		},
 		"book": {
@@ -165,50 +149,6 @@ func (h Handlers) commandRegistry() map[string]Command {
 			Description: "начать запись на услугу (wizard)",
 			BuildText: func(_ *tgbotapi.Message) string {
 				return "Starting booking flow..."
-			},
-		},
-		"menu": {
-			Name:        "menu",
-			Description: "показать демо-меню кнопками",
-			BuildText: func(_ *tgbotapi.Message) string {
-				return "Пожалуйста, выберите пункт меню."
-			},
-		},
-		"about": {
-			Name:        "about",
-			Description: "чем полезен такой бот для бизнеса",
-			ParseMode:   tgbotapi.ModeMarkdown,
-			BuildText: func(_ *tgbotapi.Message) string {
-				return "Этот бот — пример того, что вы можете получить как продукт.\n\n" +
-					"Он подходит, если вам нужно:\n" +
-					"- быстро отвечать клиентам 24/7\n" +
-					"- разгрузить менеджеров от типовых вопросов\n" +
-					"- собирать заявки и контакты прямо в Telegram\n" +
-					"- аккуратно подводить людей к покупке или записи.\n\n" +
-					"На основе этого бота можно добавить меню, оплату, интеграцию с CRM, базу знаний и любые сценарии под ваш бизнес."
-			},
-		},
-		"features": {
-			Name:        "features",
-			Description: "какие функции можно добавить (заявки, меню, запись, опросы...)",
-			ParseMode:   tgbotapi.ModeMarkdown,
-			BuildText: func(_ *tgbotapi.Message) string {
-				return "*Какие возможности можно добавить в такого бота:*\n\n" +
-					"- Меню с разделами (услуги, цены, контакты)\n" +
-					"- Приём заявок: имя, телефон, комментарий → вам в чат или CRM\n" +
-					"- Запись на услуги по времени (простое расписание)\n" +
-					"- Опросы и быстрый сбор обратной связи\n" +
-					"- Отправка файлов, инструкций, прайсов\n" +
-					"- Ограниченный доступ по списку клиентов или ролям.\n\n" +
-					"Текущая версия — минимальный живой пример. Все перечисленное можно добавить в этот же бот под ваши задачи."
-			},
-		},
-		"usecases": {
-			Name:        "usecases",
-			Description: "примеры задач, которые можно решить ботом",
-			ParseMode:   tgbotapi.ModeMarkdown,
-			BuildText: func(_ *tgbotapi.Message) string {
-				return renderUseCases()
 			},
 		},
 		"ping": {
@@ -241,7 +181,7 @@ func (h Handlers) commandRegistry() map[string]Command {
 				"*Что я умею прямо сейчас:*",
 			}
 
-			order := []string{"start", "book", "menu", "help", "about", "usecases", "features", "ping", "echo"}
+			order := []string{"start", "book", "help", "ping", "echo"}
 			for _, name := range order {
 				c := commands[name]
 				label := "/" + c.Name
@@ -337,12 +277,7 @@ func (h Handlers) sendCommandReply(chatID int64, cmdName string, msg *tgbotapi.M
 	if cmd.ParseMode != "" {
 		reply.ParseMode = cmd.ParseMode
 	}
-	if cmdName == "menu" {
-		inline := demoInlineMenuKeyboard()
-		reply.ReplyMarkup = &inline
-	} else {
-		reply.ReplyMarkup = commandKeyboard()
-	}
+	reply.ReplyMarkup = commandKeyboard()
 	if _, err := h.Bot.Send(reply); err != nil {
 		h.Logger.Error("failed to send command reply", "cmd", cmdName, "err", err)
 	}

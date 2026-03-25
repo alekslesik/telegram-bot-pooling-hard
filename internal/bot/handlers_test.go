@@ -139,7 +139,7 @@ func TestHandlers_HandleMessage_ButtonMappedToCommand(t *testing.T) {
 
 	msg := &tgbotapi.Message{
 		Chat: &tgbotapi.Chat{ID: 555},
-		Text: "✅ Проверка статуса",
+		Text: "🆘 Помощь",
 	}
 
 	h.HandleMessage(msg)
@@ -148,8 +148,8 @@ func TestHandlers_HandleMessage_ButtonMappedToCommand(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected MessageConfig, got %T", fb.last)
 	}
-	if !strings.Contains(cfg.Text, "pong") {
-		t.Fatalf("expected status response, got %q", cfg.Text)
+	if !strings.Contains(cfg.Text, "Что я умею") {
+		t.Fatalf("expected help response, got %q", cfg.Text)
 	}
 }
 
@@ -186,10 +186,7 @@ func TestHandlers_HandleCommand_AllRegistered(t *testing.T) {
 		cmdLen   int
 		contains string
 	}{
-		{"menu", "/menu", 5, "выберите"},
-		{"about", "/about", 6, "пример"},
-		{"features", "/features", 9, "возможности"},
-		{"usecases", "/usecases", 9, "Примеры задач"},
+		{"start", "/start", 6, "сервисов с записью"},
 		{"help", "/help", 5, "Что я умею"},
 		{"ping", "/ping", 5, "pong"},
 	}
@@ -205,14 +202,8 @@ func TestHandlers_HandleCommand_AllRegistered(t *testing.T) {
 			if !strings.Contains(strings.ToLower(cfg.Text), strings.ToLower(tt.contains)) {
 				t.Errorf("reply %q should contain %q", cfg.Text, tt.contains)
 			}
-			if tt.cmd == "menu" {
-				if _, ok := cfg.ReplyMarkup.(*tgbotapi.InlineKeyboardMarkup); !ok {
-					t.Fatalf("menu should use inline keyboard, got %T", cfg.ReplyMarkup)
-				}
-			} else {
-				if _, ok := cfg.ReplyMarkup.(tgbotapi.ReplyKeyboardMarkup); !ok {
-					t.Fatalf("expected reply keyboard, got %T", cfg.ReplyMarkup)
-				}
+			if _, ok := cfg.ReplyMarkup.(tgbotapi.ReplyKeyboardMarkup); !ok {
+				t.Fatalf("expected reply keyboard, got %T", cfg.ReplyMarkup)
 			}
 		})
 	}
