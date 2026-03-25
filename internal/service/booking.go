@@ -13,11 +13,12 @@ import (
 )
 
 const (
-	StateWaitingName    = "waiting_name"
-	StateWaitingPhone   = "waiting_phone"
-	StateWaitingService = "waiting_service"
-	StateWaitingSlot    = "waiting_slot"
-	StateWaitingConfirm = "waiting_confirm"
+	StateWaitingName     = "waiting_name"
+	StateWaitingPhone    = "waiting_phone"
+	StateWaitingService  = "waiting_service"
+	StateWaitingSlot     = "waiting_slot"
+	StateWaitingConfirm  = "waiting_confirm"
+	StateWaitingDocument = "waiting_document"
 )
 
 type statePayload struct {
@@ -80,9 +81,18 @@ func (s *BookingService) HandleText(ctx context.Context, userID int64, text stri
 		return s.handleSlotSelection(ctx, userID, payload, text)
 	case StateWaitingConfirm:
 		return s.handleConfirmation(ctx, userID, payload, text)
+	case StateWaitingDocument:
+		return true, "Ожидаю документ. Отправьте файл или фото.", nil
 	default:
 		return false, "", nil
 	}
+}
+
+func (s *BookingService) StartDocumentUpload(ctx context.Context, userID int64) (string, error) {
+	if err := s.saveState(ctx, userID, StateWaitingDocument, statePayload{}); err != nil {
+		return "", err
+	}
+	return "Отправьте документ одним сообщением (файл или фото).", nil
 }
 
 func (s *BookingService) handleNameInput(ctx context.Context, userID int64, payload statePayload, text string) (bool, string, error) {
@@ -386,4 +396,45 @@ func (s *BookingService) CancelClinicBooking(ctx context.Context, userID, bookin
 		item.DoctorName,
 		item.StartAt.Format("02.01.2006 15:04"),
 	), nil
+}
+
+func (s *BookingService) SaveUploadedDocument(ctx context.Context, userID int64, fileID, fileName, mimeType string, fileSize int) (string, error) {
+	st, err := s.repo.GetConversationState(ctx, userID)
+	if err != nil {
+		if err == repository.ErrNotFound {
+			return "Сначала нажмите «📤 Загрузить документ».", nil
+		}
+		return "", err
+	}
+	if st.State != StateWaitingDocument {
+		return "Сначала нажмите «📤 Загрузить документ».", nil
+	}
+	if strings.TrimSpace(fileID) == "" {
+		return "Не удалось получить идентификатор файла. Попробуйте снова.", nil
+	}
+	_, err = s.repo.SaveUserDocument(ctx, repository.UserDocument{
+		TelegramUserID: userID,
+		FileID:         fileID,
+		FileName:       strings.TrimSpace(fileName),
+		MimeType:       strings.TrimSpace(mimeType),
+		FileSize:       fileSize,
+		CreatedAt:      time.Now().UTC(),
+	})
+	if err != nil {
+		return "", err
+	}
+	_ = s.repo.DeleteConversationState(ctx, userID)
+	recent, err := s.repo.ListRecentUserDocuments(ctx, userID, 3)
+	if err != nil {
+		return "", err
+	}
+	var names []string
+	for _, d := range recent {
+		name := d.FileName
+		if strings.TrimSpace(name) == "" {
+			name = "Без имени"
+		}
+		names = append(names, name)
+	}
+	return "Документ сохранен. Последние загрузки: " + strings.Join(names, ", "), nil
 }

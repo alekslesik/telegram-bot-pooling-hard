@@ -41,11 +41,12 @@ type UseCaseCategory struct {
 }
 
 var commandButtons = map[string]string{
-	"🚀 Старт":         "start",
-	"🗓️ Записаться":   "book",
-	"📅 Мои записи":    "mybookings",
-	"❌ Отмена записи": "cancelbooking",
-	"🆘 Помощь":        "help",
+	"🚀 Старт":              "start",
+	"🗓️ Записаться":        "book",
+	"📅 Мои записи":         "mybookings",
+	"❌ Отмена записи":      "cancelbooking",
+	"📤 Загрузить документ": "uploaddoc",
+	"🆘 Помощь":             "help",
 }
 
 // demoInlineMenuKeyboard — те же пункты, что reply-клавиатура и меню у поля ввода.
@@ -84,6 +85,7 @@ func commandKeyboard() tgbotapi.ReplyKeyboardMarkup {
 			tgbotapi.NewKeyboardButton("📅 Мои записи"),
 		),
 		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("📤 Загрузить документ"),
 			tgbotapi.NewKeyboardButton("🆘 Помощь"),
 		),
 	)
@@ -224,6 +226,18 @@ func (h Handlers) HandleMessage(msg *tgbotapi.Message) {
 	}
 
 	if h.Booking != nil {
+		if msg.Document != nil {
+			h.handleIncomingDocument(chatID, telegramUserID(msg), msg.Document.FileID, msg.Document.FileName, msg.Document.MimeType, msg.Document.FileSize)
+			return
+		}
+		if len(msg.Photo) > 0 {
+			photo := msg.Photo[len(msg.Photo)-1]
+			h.handleIncomingDocument(chatID, telegramUserID(msg), photo.FileID, "photo_"+photo.FileID+".jpg", "image/jpeg", photo.FileSize)
+			return
+		}
+	}
+
+	if h.Booking != nil {
 		handled, replyText, err := h.Booking.HandleText(context.Background(), telegramUserID(msg), msg.Text)
 		if err != nil {
 			h.Logger.Error("booking flow failed", "err", err)
@@ -251,6 +265,19 @@ func (h Handlers) HandleCommand(msg *tgbotapi.Message) {
 }
 
 func (h Handlers) sendCommandReply(chatID int64, cmdName string, msg *tgbotapi.Message) {
+	if h.Booking != nil && cmdName == "uploaddoc" {
+		text, err := h.Booking.StartDocumentUpload(context.Background(), telegramUserID(msg))
+		if err != nil {
+			h.Logger.Error("failed to start document upload", "err", err)
+			text = "Не удалось начать загрузку. Попробуйте позже."
+		}
+		reply := tgbotapi.NewMessage(chatID, text)
+		reply.ReplyMarkup = commandKeyboard()
+		if _, err := h.Bot.Send(reply); err != nil {
+			h.Logger.Error("failed to send upload-doc prompt", "err", err)
+		}
+		return
+	}
 	if h.Booking != nil && cmdName == "cancelbooking" {
 		reply := tgbotapi.NewMessage(chatID, "Выберите запись для отмены:")
 		reply.ReplyMarkup = h.cancelBookingsKeyboard(context.Background(), telegramUserID(msg), 0)
@@ -682,4 +709,17 @@ func parseInt64(raw string) (int64, bool) {
 		return 0, false
 	}
 	return v, true
+}
+
+func (h Handlers) handleIncomingDocument(chatID, userID int64, fileID, fileName, mimeType string, fileSize int) {
+	text, err := h.Booking.SaveUploadedDocument(context.Background(), userID, fileID, fileName, mimeType, fileSize)
+	if err != nil {
+		h.Logger.Error("failed to save uploaded document", "err", err)
+		text = "Не удалось сохранить документ. Попробуйте позже."
+	}
+	reply := tgbotapi.NewMessage(chatID, text)
+	reply.ReplyMarkup = commandKeyboard()
+	if _, err := h.Bot.Send(reply); err != nil {
+		h.Logger.Error("failed to send upload result", "err", err)
+	}
 }

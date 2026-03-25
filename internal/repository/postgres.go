@@ -410,6 +410,38 @@ func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bo
 	return item, nil
 }
 
+func (r *PostgresRepository) SaveUserDocument(ctx context.Context, doc UserDocument) (UserDocument, error) {
+	err := r.db.QueryRowContext(ctx, `
+		INSERT INTO user_documents (telegram_user_id, file_id, file_name, mime_type, file_size)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, created_at`,
+		doc.TelegramUserID, doc.FileID, doc.FileName, doc.MimeType, doc.FileSize).
+		Scan(&doc.ID, &doc.CreatedAt)
+	return doc, err
+}
+
+func (r *PostgresRepository) ListRecentUserDocuments(ctx context.Context, userID int64, limit int) ([]UserDocument, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, telegram_user_id, file_id, file_name, mime_type, file_size, created_at
+		FROM user_documents
+		WHERE telegram_user_id = $1
+		ORDER BY created_at DESC, id DESC
+		LIMIT $2`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UserDocument
+	for rows.Next() {
+		var d UserDocument
+		if err := rows.Scan(&d.ID, &d.TelegramUserID, &d.FileID, &d.FileName, &d.MimeType, &d.FileSize, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
 func (r *PostgresRepository) GetConversationState(ctx context.Context, userID int64) (ConversationState, error) {
 	var st ConversationState
 	err := r.db.QueryRowContext(ctx, `
