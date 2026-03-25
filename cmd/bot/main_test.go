@@ -50,6 +50,7 @@ func TestFormatBuildDate_loadLocationFails(t *testing.T) {
 
 type stubTelegram struct {
 	last tgbotapi.Chattable
+	err  error
 }
 
 func (s *stubTelegram) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
@@ -59,6 +60,9 @@ func (s *stubTelegram) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
 
 func (s *stubTelegram) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
 	s.last = c
+	if s.err != nil {
+		return nil, s.err
+	}
 	return &tgbotapi.APIResponse{Ok: true}, nil
 }
 
@@ -129,5 +133,26 @@ func TestTokenFromEnv(t *testing.T) {
 func TestLongPollTimeoutSeconds(t *testing.T) {
 	if longPollTimeoutSeconds() != 60 {
 		t.Fatal("unexpected long poll timeout")
+	}
+}
+
+func TestClearBotCommands(t *testing.T) {
+	st := &stubTelegram{}
+	var buf bytes.Buffer
+	clearBotCommands(st, logging.NewWithWriter(&buf))
+	if _, ok := st.last.(tgbotapi.DeleteMyCommandsConfig); !ok {
+		t.Fatalf("expected DeleteMyCommandsConfig, got %T", st.last)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("expected no error log, got %s", buf.String())
+	}
+}
+
+func TestClearBotCommands_ErrorLogged(t *testing.T) {
+	st := &stubTelegram{err: errors.New("boom")}
+	var buf bytes.Buffer
+	clearBotCommands(st, logging.NewWithWriter(&buf))
+	if !bytes.Contains(buf.Bytes(), []byte("failed to clear bot commands")) {
+		t.Fatalf("unexpected log output: %s", buf.String())
 	}
 }

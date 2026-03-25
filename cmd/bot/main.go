@@ -78,6 +78,16 @@ type slogLogger interface {
 	Error(msg string, args ...any)
 }
 
+type commandRegistrar interface {
+	Request(tgbotapi.Chattable) (*tgbotapi.APIResponse, error)
+}
+
+func clearBotCommands(reg commandRegistrar, logger slogLogger) {
+	if _, err := reg.Request(tgbotapi.NewDeleteMyCommands()); err != nil {
+		logger.Error("failed to clear bot commands", "err", err)
+	}
+}
+
 func tokenFromEnv() string {
 	return strings.TrimSpace(os.Getenv("TOKEN"))
 }
@@ -110,6 +120,7 @@ func main() {
 	}
 
 	logAuthorized(logger, username, tg.Self.UserName)
+	clearBotCommands(tg, logger)
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = longPollTimeoutSeconds()
