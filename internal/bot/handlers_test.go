@@ -349,7 +349,7 @@ func TestHandlers_BookingFlow(t *testing.T) {
 
 	h.HandleCommand(commandMessage(1, "/book", 5))
 	cfg, ok := fb.last.(tgbotapi.MessageConfig)
-	if !ok || !strings.Contains(cfg.Text, "full name") {
+	if !ok || !strings.Contains(cfg.Text, "ФИО") {
 		t.Fatalf("unexpected /book response: %T %+v", fb.last, cfg)
 	}
 
@@ -358,11 +358,11 @@ func TestHandlers_BookingFlow(t *testing.T) {
 		t.Fatalf("name step failed: handled=%v err=%v msg=%q", handled, err, msg)
 	}
 	handled, msg, err = h.Booking.HandleText(context.Background(), 1, "+79991234567")
-	if err != nil || !handled || !strings.Contains(msg, "Choose a service") {
+	if err != nil || !handled || !strings.Contains(msg, "Профиль сохранен") {
 		t.Fatalf("phone step failed: handled=%v err=%v msg=%q", handled, err, msg)
 	}
 	handled, msg, err = h.Booking.HandleText(context.Background(), 1, "1")
-	if err != nil || !handled || !strings.Contains(msg, "Choose a slot") {
-		t.Fatalf("step service selection failed: handled=%v err=%v msg=%q", handled, err, msg)
+	if err != nil || handled || msg != "" {
+		t.Fatalf("expected registration flow completed: handled=%v err=%v msg=%q", handled, err, msg)
 	}
 }

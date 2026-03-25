@@ -18,7 +18,7 @@ func TestBookingService_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start error: %v", err)
 	}
-	if !strings.Contains(start, "full name") {
+	if !strings.Contains(start, "ФИО") {
 		t.Fatalf("unexpected start text: %q", start)
 	}
 
@@ -26,7 +26,7 @@ func TestBookingService_HappyPath(t *testing.T) {
 	if err != nil || !handled {
 		t.Fatalf("name step failed: handled=%v err=%v", handled, err)
 	}
-	if !strings.Contains(msg, "phone number") {
+	if !strings.Contains(msg, "phone") {
 		t.Fatalf("unexpected phone prompt: %q", msg)
 	}
 
@@ -34,32 +34,34 @@ func TestBookingService_HappyPath(t *testing.T) {
 	if err != nil || !handled {
 		t.Fatalf("phone step failed: handled=%v err=%v", handled, err)
 	}
-	if !strings.Contains(msg, "Choose a service") {
-		t.Fatalf("unexpected service prompt: %q", msg)
+	if !strings.Contains(msg, "Профиль сохранен") {
+		t.Fatalf("unexpected profile saved prompt: %q", msg)
 	}
-
-	handled, msg, err = svc.HandleText(ctx, userID, "1")
-	if err != nil || !handled {
-		t.Fatalf("service selection failed: handled=%v err=%v", handled, err)
+	handled, msg, err = svc.HandleText(ctx, userID, "extra")
+	if err != nil {
+		t.Fatalf("extra message error: %v", err)
 	}
-	if !strings.Contains(msg, "Choose a slot") {
-		t.Fatalf("unexpected slot prompt: %q", msg)
+	if handled || msg != "" {
+		t.Fatalf("expected no active text flow after registration, got handled=%v msg=%q", handled, msg)
 	}
-
-	handled, msg, err = svc.HandleText(ctx, userID, "1")
-	if err != nil || !handled {
-		t.Fatalf("slot selection failed: handled=%v err=%v", handled, err)
+	specialties, totalSpecialties, err := svc.ListSpecialtiesPage(ctx, 0, 4)
+	if err != nil || totalSpecialties == 0 || len(specialties) == 0 {
+		t.Fatalf("specialties list error: total=%d len=%d err=%v", totalSpecialties, len(specialties), err)
 	}
-	if !strings.Contains(msg, "Reply YES to confirm") {
-		t.Fatalf("unexpected confirmation text: %q", msg)
+	doctors, totalDoctors, err := svc.ListDoctorsPage(ctx, specialties[0].ID, 0, 4)
+	if err != nil || totalDoctors == 0 || len(doctors) == 0 {
+		t.Fatalf("doctors list error: total=%d len=%d err=%v", totalDoctors, len(doctors), err)
 	}
-
-	handled, msg, err = svc.HandleText(ctx, userID, "YES")
-	if err != nil || !handled {
-		t.Fatalf("confirmation failed: handled=%v err=%v", handled, err)
+	slots, totalSlots, err := svc.ListSlotsPage(ctx, specialties[0].ID, doctors[0].ID, 0, 4)
+	if err != nil || totalSlots == 0 || len(slots) == 0 {
+		t.Fatalf("slots list error: total=%d len=%d err=%v", totalSlots, len(slots), err)
 	}
-	if !strings.Contains(msg, "Booking confirmed") {
-		t.Fatalf("unexpected final text: %q", msg)
+	final, err := svc.ConfirmClinicBooking(ctx, userID, specialties[0].ID, doctors[0].ID, slots[0].ID)
+	if err != nil {
+		t.Fatalf("confirm clinic booking error: %v", err)
+	}
+	if !strings.Contains(final, "Запись подтверждена") {
+		t.Fatalf("unexpected confirmation text: %q", final)
 	}
 }
 
@@ -78,16 +80,12 @@ func TestBookingService_StatePersistenceAcrossServiceInstances(t *testing.T) {
 	if _, _, err := svc1.HandleText(ctx, userID, "+79991234567"); err != nil {
 		t.Fatalf("phone step error: %v", err)
 	}
-	if _, _, err := svc1.HandleText(ctx, userID, "1"); err != nil {
-		t.Fatalf("service selection error: %v", err)
-	}
-
 	svc2 := NewBookingService(repo)
 	handled, msg, err := svc2.HandleText(ctx, userID, "1")
 	if err != nil {
 		t.Fatalf("slot selection error after restart: %v", err)
 	}
-	if !handled || !strings.Contains(msg, "Reply YES to confirm") {
+	if handled || msg != "" {
 		t.Fatalf("unexpected result after restart: handled=%v msg=%q", handled, msg)
 	}
 }
@@ -127,7 +125,7 @@ func TestBookingService_RegisteredClientSkipsRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start error: %v", err)
 	}
-	if !strings.Contains(start, "Choose a service") {
+	if !strings.Contains(start, "Выберите направление") {
 		t.Fatalf("registered client should skip registration, got %q", start)
 	}
 }

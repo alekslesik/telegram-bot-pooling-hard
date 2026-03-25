@@ -42,10 +42,7 @@ func (s *BookingService) Start(ctx context.Context, userID int64) (string, error
 	switch {
 	case err == nil:
 		if strings.TrimSpace(client.FullName) != "" && strings.TrimSpace(client.Phone) != "" {
-			return s.startServiceSelection(ctx, userID, statePayload{
-				FullName: client.FullName,
-				Phone:    client.Phone,
-			})
+			return "Выберите направление и врача в меню ниже.", nil
 		}
 	case err != repository.ErrNotFound:
 		return "", err
@@ -53,27 +50,7 @@ func (s *BookingService) Start(ctx context.Context, userID int64) (string, error
 	if err := s.saveState(ctx, userID, StateWaitingName, statePayload{}); err != nil {
 		return "", err
 	}
-	return "Welcome! Before booking, please enter your full name.", nil
-}
-
-func (s *BookingService) startServiceSelection(ctx context.Context, userID int64, payload statePayload) (string, error) {
-	services, err := s.repo.ListActiveServices(ctx)
-	if err != nil {
-		return "", err
-	}
-	if len(services) == 0 {
-		return "No services available right now. Please try again later.", nil
-	}
-	if err := s.saveState(ctx, userID, StateWaitingService, payload); err != nil {
-		return "", err
-	}
-	var b strings.Builder
-	b.WriteString("Choose a service by number:\n")
-	for i, srv := range services {
-		fmt.Fprintf(&b, "%d) %s (%d min)\n", i+1, srv.Name, srv.DurationMin)
-	}
-	b.WriteString("\nSend /cancel to reset.")
-	return strings.TrimSpace(b.String()), nil
+	return "Перед записью введите, пожалуйста, ваше ФИО.", nil
 }
 
 func (s *BookingService) Cancel(ctx context.Context, userID int64) (string, error) {
@@ -133,8 +110,10 @@ func (s *BookingService) handlePhoneInput(ctx context.Context, userID int64, pay
 	}); err != nil {
 		return true, "", err
 	}
-	reply, err := s.startServiceSelection(ctx, userID, payload)
-	return true, reply, err
+	if err := s.repo.DeleteConversationState(ctx, userID); err != nil {
+		return true, "", err
+	}
+	return true, "Профиль сохранен. Нажмите \"🗓️ Записаться\", чтобы выбрать направление и врача.", nil
 }
 
 func (s *BookingService) handleServiceSelection(ctx context.Context, userID int64, payload statePayload, text string) (bool, string, error) {
@@ -285,4 +264,96 @@ func looksLikePhone(phone string) bool {
 		}
 	}
 	return true
+}
+
+func (s *BookingService) IsRegistered(ctx context.Context, userID int64) (bool, error) {
+	client, err := s.repo.GetClientByUserID(ctx, userID)
+	if err == repository.ErrNotFound {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(client.FullName) != "" && strings.TrimSpace(client.Phone) != "", nil
+}
+
+func (s *BookingService) ListSpecialtiesPage(ctx context.Context, page, pageSize int) ([]repository.Specialty, int, error) {
+	offset := page * pageSize
+	items, err := s.repo.ListSpecialties(ctx, pageSize, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := s.repo.CountSpecialties(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
+func (s *BookingService) ListDoctorsPage(ctx context.Context, specialtyID int64, page, pageSize int) ([]repository.Doctor, int, error) {
+	offset := page * pageSize
+	items, err := s.repo.ListDoctorsBySpecialty(ctx, specialtyID, pageSize, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := s.repo.CountDoctorsBySpecialty(ctx, specialtyID)
+	if err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
+func (s *BookingService) ListSlotsPage(ctx context.Context, specialtyID, doctorID int64, page, pageSize int) ([]repository.DoctorSlot, int, error) {
+	offset := page * pageSize
+	items, err := s.repo.ListAvailableDoctorSlots(ctx, specialtyID, doctorID, pageSize, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := s.repo.CountAvailableDoctorSlots(ctx, specialtyID, doctorID)
+	if err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
+func (s *BookingService) ConfirmClinicBooking(ctx context.Context, userID, specialtyID, doctorID, slotID int64) (string, error) {
+	slot, err := s.repo.GetDoctorSlotByID(ctx, slotID)
+	if err != nil {
+		return "", err
+	}
+	if !slot.IsAvailable || slot.DoctorID != doctorID || slot.SpecialtyID != specialtyID {
+		return "Этот слот уже недоступен. Выберите другое время.", nil
+	}
+	if err := s.repo.MarkDoctorSlotUnavailable(ctx, slotID); err != nil {
+		if err == repository.ErrNotFound {
+			return "Этот слот уже занят. Выберите другое время.", nil
+		}
+		return "", err
+	}
+	booking, err := s.repo.CreateClinicBooking(ctx, repository.ClinicBooking{
+		TelegramUserID: userID,
+		SpecialtyID:    specialtyID,
+		DoctorID:       doctorID,
+		DoctorSlotID:   slotID,
+		Status:         "confirmed",
+		CreatedAt:      time.Now().UTC(),
+	})
+	if err != nil {
+		return "", err
+	}
+	doctor, err := s.repo.GetDoctorByID(ctx, doctorID)
+	if err != nil {
+		return "", err
+	}
+	specialty, err := s.repo.GetSpecialtyByID(ctx, specialtyID)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(
+		"Запись подтверждена.\nID: %d\nНаправление: %s\nВрач: %s\nВремя: %s",
+		booking.ID,
+		specialty.Name,
+		doctor.FullName,
+		slot.StartAt.Format("02.01.2006 15:04"),
+	), nil
 }
