@@ -302,12 +302,17 @@ func (r *MemoryRepository) MarkDoctorSlotUnavailable(_ context.Context, slotID i
 func (r *MemoryRepository) ListUserClinicBookings(_ context.Context, userID int64, limit, offset int) ([]ClinicBookingView, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	now := time.Now().UTC()
 	var out []ClinicBookingView
 	for _, b := range r.clinicBooking {
 		if b.TelegramUserID != userID {
 			continue
 		}
-		out = append(out, r.toClinicBookingViewLocked(b))
+		item := r.toClinicBookingViewLocked(b)
+		if item.Status != "confirmed" || item.StartAt.Before(now) {
+			continue
+		}
+		out = append(out, item)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].StartAt.Before(out[j].StartAt) })
 	start, end := pageBounds(len(out), limit, offset)
@@ -317,9 +322,14 @@ func (r *MemoryRepository) ListUserClinicBookings(_ context.Context, userID int6
 func (r *MemoryRepository) CountUserClinicBookings(_ context.Context, userID int64) (int, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	now := time.Now().UTC()
 	count := 0
 	for _, b := range r.clinicBooking {
-		if b.TelegramUserID == userID {
+		if b.TelegramUserID != userID {
+			continue
+		}
+		item := r.toClinicBookingViewLocked(b)
+		if item.Status == "confirmed" && !item.StartAt.Before(now) {
 			count++
 		}
 	}

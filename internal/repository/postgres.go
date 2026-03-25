@@ -320,6 +320,8 @@ func (r *PostgresRepository) ListUserClinicBookings(ctx context.Context, userID 
 		INNER JOIN doctors d ON d.id = cb.doctor_id
 		INNER JOIN doctor_slots ds ON ds.id = cb.doctor_slot_id
 		WHERE cb.telegram_user_id = $1
+		  AND cb.status = 'confirmed'
+		  AND ds.start_at >= NOW()
 		ORDER BY ds.start_at ASC, cb.id ASC
 		LIMIT $2 OFFSET $3`, userID, limit, offset)
 	if err != nil {
@@ -339,7 +341,13 @@ func (r *PostgresRepository) ListUserClinicBookings(ctx context.Context, userID 
 
 func (r *PostgresRepository) CountUserClinicBookings(ctx context.Context, userID int64) (int, error) {
 	var count int
-	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM clinic_bookings WHERE telegram_user_id = $1`, userID).Scan(&count)
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM clinic_bookings cb
+		INNER JOIN doctor_slots ds ON ds.id = cb.doctor_slot_id
+		WHERE cb.telegram_user_id = $1
+		  AND cb.status = 'confirmed'
+		  AND ds.start_at >= NOW()`, userID).Scan(&count)
 	return count, err
 }
 
