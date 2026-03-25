@@ -43,6 +43,7 @@ type UseCaseCategory struct {
 var commandButtons = map[string]string{
 	"🚀 Старт":         "start",
 	"🗓️ Записаться":   "book",
+	"📅 Мои записи":    "mybookings",
 	"❌ Отмена записи": "cancelbooking",
 	"🆘 Помощь":        "help",
 }
@@ -80,6 +81,9 @@ func commandKeyboard() tgbotapi.ReplyKeyboardMarkup {
 		),
 		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("❌ Отмена записи"),
+			tgbotapi.NewKeyboardButton("📅 Мои записи"),
+		),
+		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("🆘 Помощь"),
 		),
 	)
@@ -255,6 +259,14 @@ func (h Handlers) sendCommandReply(chatID int64, cmdName string, msg *tgbotapi.M
 		}
 		return
 	}
+	if h.Booking != nil && cmdName == "mybookings" {
+		reply := tgbotapi.NewMessage(chatID, "Ваши ближайшие записи:")
+		reply.ReplyMarkup = h.myBookingsKeyboard(context.Background(), telegramUserID(msg), 0)
+		if _, err := h.Bot.Send(reply); err != nil {
+			h.Logger.Error("failed to send my-bookings menu", "err", err)
+		}
+		return
+	}
 	if h.Booking != nil && (cmdName == "book" || cmdName == "cancel") {
 		var (
 			replyText string
@@ -325,6 +337,13 @@ func (h Handlers) HandleCallback(q *tgbotapi.CallbackQuery) {
 		return
 	}
 	data := strings.TrimSpace(q.Data)
+	if strings.HasPrefix(data, "my:") {
+		if _, err := h.Bot.Request(tgbotapi.NewCallback(q.ID, "")); err != nil {
+			h.Logger.Error("failed to answer my-bookings callback", "err", err)
+		}
+		h.handleMyBookingsCallback(q)
+		return
+	}
 	if strings.HasPrefix(data, "cancel:") {
 		if _, err := h.Bot.Request(tgbotapi.NewCallback(q.ID, "")); err != nil {
 			h.Logger.Error("failed to answer cancel callback", "err", err)
@@ -354,6 +373,35 @@ func (h Handlers) HandleCallback(q *tgbotapi.CallbackQuery) {
 		From: q.From,
 	}
 	h.sendCommandReply(q.Message.Chat.ID, cmdName, fake)
+}
+
+func (h Handlers) handleMyBookingsCallback(q *tgbotapi.CallbackQuery) {
+	parts := strings.Split(strings.TrimSpace(q.Data), ":")
+	if len(parts) < 2 || parts[0] != "my" || h.Booking == nil {
+		return
+	}
+	userID := q.Message.Chat.ID
+	if q.From != nil {
+		userID = q.From.ID
+	}
+	chatID := q.Message.Chat.ID
+	switch parts[1] {
+	case "page":
+		if len(parts) != 3 {
+			return
+		}
+		page, ok := parsePositiveInt(parts[2])
+		if !ok {
+			return
+		}
+		reply := tgbotapi.NewMessage(chatID, "Ваши ближайшие записи:")
+		reply.ReplyMarkup = h.myBookingsKeyboard(context.Background(), userID, page)
+		_, _ = h.Bot.Send(reply)
+	case "close":
+		reply := tgbotapi.NewMessage(chatID, "Ок, список записей закрыт.")
+		reply.ReplyMarkup = commandKeyboard()
+		_, _ = h.Bot.Send(reply)
+	}
 }
 
 func (h Handlers) handleCancelCallback(q *tgbotapi.CallbackQuery) {
@@ -575,6 +623,32 @@ func (h Handlers) cancelBookingsKeyboard(ctx context.Context, userID int64, page
 		))
 	}
 	inline.InlineKeyboard = append(inline.InlineKeyboard, pageRow("cancel:page", page, total, inlinePageSize, "cancel:close"))
+	return &inline
+}
+
+func (h Handlers) myBookingsKeyboard(ctx context.Context, userID int64, page int) *tgbotapi.InlineKeyboardMarkup {
+	inline := tgbotapi.NewInlineKeyboardMarkup()
+	if h.Booking == nil {
+		return &inline
+	}
+	items, total, err := h.Booking.ListClinicBookingsPage(ctx, userID, page, inlinePageSize)
+	if err != nil {
+		h.Logger.Error("list my bookings failed", "err", err)
+		return &inline
+	}
+	if len(items) == 0 {
+		inline.InlineKeyboard = append(inline.InlineKeyboard, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Записей нет", "my:close"),
+		))
+		return &inline
+	}
+	for _, item := range items {
+		label := fmt.Sprintf("%s | %s | %s", item.StartAt.Format("02.01 15:04"), item.SpecialtyName, item.DoctorName)
+		inline.InlineKeyboard = append(inline.InlineKeyboard, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(label, "my:page:"+strconv.Itoa(page)),
+		))
+	}
+	inline.InlineKeyboard = append(inline.InlineKeyboard, pageRow("my:page", page, total, inlinePageSize, "my:close"))
 	return &inline
 }
 
