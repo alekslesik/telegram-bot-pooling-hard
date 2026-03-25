@@ -357,3 +357,33 @@ func (s *BookingService) ConfirmClinicBooking(ctx context.Context, userID, speci
 		slot.StartAt.Format("02.01.2006 15:04"),
 	), nil
 }
+
+func (s *BookingService) ListClinicBookingsPage(ctx context.Context, userID int64, page, pageSize int) ([]repository.ClinicBookingView, int, error) {
+	offset := page * pageSize
+	items, err := s.repo.ListUserClinicBookings(ctx, userID, pageSize, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := s.repo.CountUserClinicBookings(ctx, userID)
+	if err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
+func (s *BookingService) CancelClinicBooking(ctx context.Context, userID, bookingID int64) (string, error) {
+	item, err := s.repo.CancelClinicBooking(ctx, userID, bookingID)
+	if err != nil {
+		if err == repository.ErrNotFound {
+			return "Запись не найдена.", nil
+		}
+		return "", err
+	}
+	return fmt.Sprintf(
+		"Запись отменена.\nID: %d\nНаправление: %s\nВрач: %s\nВремя: %s",
+		item.ID,
+		item.SpecialtyName,
+		item.DoctorName,
+		item.StartAt.Format("02.01.2006 15:04"),
+	), nil
+}

@@ -41,9 +41,10 @@ type UseCaseCategory struct {
 }
 
 var commandButtons = map[string]string{
-	"🚀 Старт":       "start",
-	"🗓️ Записаться": "book",
-	"🆘 Помощь":      "help",
+	"🚀 Старт":         "start",
+	"🗓️ Записаться":   "book",
+	"❌ Отмена записи": "cancelbooking",
+	"🆘 Помощь":        "help",
 }
 
 // demoInlineMenuKeyboard — те же пункты, что reply-клавиатура и меню у поля ввода.
@@ -78,6 +79,7 @@ func commandKeyboard() tgbotapi.ReplyKeyboardMarkup {
 			tgbotapi.NewKeyboardButton("🗓️ Записаться"),
 		),
 		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("❌ Отмена записи"),
 			tgbotapi.NewKeyboardButton("🆘 Помощь"),
 		),
 	)
@@ -245,6 +247,14 @@ func (h Handlers) HandleCommand(msg *tgbotapi.Message) {
 }
 
 func (h Handlers) sendCommandReply(chatID int64, cmdName string, msg *tgbotapi.Message) {
+	if h.Booking != nil && cmdName == "cancelbooking" {
+		reply := tgbotapi.NewMessage(chatID, "Выберите запись для отмены:")
+		reply.ReplyMarkup = h.cancelBookingsKeyboard(context.Background(), telegramUserID(msg), 0)
+		if _, err := h.Bot.Send(reply); err != nil {
+			h.Logger.Error("failed to send cancel-booking menu", "err", err)
+		}
+		return
+	}
 	if h.Booking != nil && (cmdName == "book" || cmdName == "cancel") {
 		var (
 			replyText string
@@ -315,6 +325,13 @@ func (h Handlers) HandleCallback(q *tgbotapi.CallbackQuery) {
 		return
 	}
 	data := strings.TrimSpace(q.Data)
+	if strings.HasPrefix(data, "cancel:") {
+		if _, err := h.Bot.Request(tgbotapi.NewCallback(q.ID, "")); err != nil {
+			h.Logger.Error("failed to answer cancel callback", "err", err)
+		}
+		h.handleCancelCallback(q)
+		return
+	}
 	if strings.HasPrefix(data, "book:") {
 		if _, err := h.Bot.Request(tgbotapi.NewCallback(q.ID, "")); err != nil {
 			h.Logger.Error("failed to answer booking callback", "err", err)
@@ -337,6 +354,51 @@ func (h Handlers) HandleCallback(q *tgbotapi.CallbackQuery) {
 		From: q.From,
 	}
 	h.sendCommandReply(q.Message.Chat.ID, cmdName, fake)
+}
+
+func (h Handlers) handleCancelCallback(q *tgbotapi.CallbackQuery) {
+	parts := strings.Split(strings.TrimSpace(q.Data), ":")
+	if len(parts) < 2 || parts[0] != "cancel" || h.Booking == nil {
+		return
+	}
+	userID := q.Message.Chat.ID
+	if q.From != nil {
+		userID = q.From.ID
+	}
+	chatID := q.Message.Chat.ID
+	switch parts[1] {
+	case "page":
+		if len(parts) != 3 {
+			return
+		}
+		page, ok := parsePositiveInt(parts[2])
+		if !ok {
+			return
+		}
+		reply := tgbotapi.NewMessage(chatID, "Выберите запись для отмены:")
+		reply.ReplyMarkup = h.cancelBookingsKeyboard(context.Background(), userID, page)
+		_, _ = h.Bot.Send(reply)
+	case "item":
+		if len(parts) != 3 {
+			return
+		}
+		bookingID, ok := parseInt64(parts[2])
+		if !ok {
+			return
+		}
+		text, err := h.Booking.CancelClinicBooking(context.Background(), userID, bookingID)
+		if err != nil {
+			h.Logger.Error("cancel clinic booking failed", "err", err)
+			text = "Не удалось отменить запись. Попробуйте позже."
+		}
+		reply := tgbotapi.NewMessage(chatID, text)
+		reply.ReplyMarkup = commandKeyboard()
+		_, _ = h.Bot.Send(reply)
+	case "close":
+		reply := tgbotapi.NewMessage(chatID, "Ок, отмена записи закрыта.")
+		reply.ReplyMarkup = commandKeyboard()
+		_, _ = h.Bot.Send(reply)
+	}
 }
 
 func (h Handlers) handleBookingCallback(q *tgbotapi.CallbackQuery) {
@@ -487,6 +549,32 @@ func (h Handlers) slotsKeyboard(ctx context.Context, specialtyID, doctorID int64
 		))
 	}
 	inline.InlineKeyboard = append(inline.InlineKeyboard, pageRow("book:slotp:"+fmt.Sprintf("%d:%d", specialtyID, doctorID), page, total, inlinePageSize, fmt.Sprintf("book:spec:%d:0", specialtyID)))
+	return &inline
+}
+
+func (h Handlers) cancelBookingsKeyboard(ctx context.Context, userID int64, page int) *tgbotapi.InlineKeyboardMarkup {
+	inline := tgbotapi.NewInlineKeyboardMarkup()
+	if h.Booking == nil {
+		return &inline
+	}
+	items, total, err := h.Booking.ListClinicBookingsPage(ctx, userID, page, inlinePageSize)
+	if err != nil {
+		h.Logger.Error("list clinic bookings failed", "err", err)
+		return &inline
+	}
+	if len(items) == 0 {
+		inline.InlineKeyboard = append(inline.InlineKeyboard, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Записей нет", "cancel:close"),
+		))
+		return &inline
+	}
+	for _, item := range items {
+		label := fmt.Sprintf("ID %d | %s | %s", item.ID, item.StartAt.Format("02.01 15:04"), item.DoctorName)
+		inline.InlineKeyboard = append(inline.InlineKeyboard, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("cancel:item:%d", item.ID)),
+		))
+	}
+	inline.InlineKeyboard = append(inline.InlineKeyboard, pageRow("cancel:page", page, total, inlinePageSize, "cancel:close"))
 	return &inline
 }
 

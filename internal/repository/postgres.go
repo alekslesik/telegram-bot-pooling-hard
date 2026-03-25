@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -309,6 +310,96 @@ func (r *PostgresRepository) MarkDoctorSlotUnavailable(ctx context.Context, slot
 		return ErrNotFound
 	}
 	return nil
+}
+
+func (r *PostgresRepository) ListUserClinicBookings(ctx context.Context, userID int64, limit, offset int) ([]ClinicBookingView, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT cb.id, s.name, d.full_name, ds.start_at, cb.status, cb.created_at
+		FROM clinic_bookings cb
+		INNER JOIN specialties s ON s.id = cb.specialty_id
+		INNER JOIN doctors d ON d.id = cb.doctor_id
+		INNER JOIN doctor_slots ds ON ds.id = cb.doctor_slot_id
+		WHERE cb.telegram_user_id = $1
+		ORDER BY ds.start_at ASC, cb.id ASC
+		LIMIT $2 OFFSET $3`, userID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ClinicBookingView
+	for rows.Next() {
+		var item ClinicBookingView
+		if err := rows.Scan(&item.ID, &item.SpecialtyName, &item.DoctorName, &item.StartAt, &item.Status, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (r *PostgresRepository) CountUserClinicBookings(ctx context.Context, userID int64) (int, error) {
+	var count int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM clinic_bookings WHERE telegram_user_id = $1`, userID).Scan(&count)
+	return count, err
+}
+
+func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bookingID int64) (ClinicBookingView, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ClinicBookingView{}, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var slotID int64
+	var status string
+	err = tx.QueryRowContext(ctx, `
+		SELECT doctor_slot_id, status
+		FROM clinic_bookings
+		WHERE id = $1 AND telegram_user_id = $2
+		FOR UPDATE`, bookingID, userID).Scan(&slotID, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ClinicBookingView{}, ErrNotFound
+	}
+	if err != nil {
+		return ClinicBookingView{}, err
+	}
+
+	if status != "cancelled" {
+		if _, err = tx.ExecContext(ctx, `
+			UPDATE clinic_bookings
+			SET status = 'cancelled', cancelled_at = NOW()
+			WHERE id = $1`, bookingID); err != nil {
+			return ClinicBookingView{}, err
+		}
+		if _, err = tx.ExecContext(ctx, `
+			UPDATE doctor_slots
+			SET is_available = TRUE
+			WHERE id = $1`, slotID); err != nil {
+			return ClinicBookingView{}, err
+		}
+	}
+
+	var item ClinicBookingView
+	err = tx.QueryRowContext(ctx, `
+		SELECT cb.id, s.name, d.full_name, ds.start_at, cb.status, cb.created_at
+		FROM clinic_bookings cb
+		INNER JOIN specialties s ON s.id = cb.specialty_id
+		INNER JOIN doctors d ON d.id = cb.doctor_id
+		INNER JOIN doctor_slots ds ON ds.id = cb.doctor_slot_id
+		WHERE cb.id = $1`, bookingID).
+		Scan(&item.ID, &item.SpecialtyName, &item.DoctorName, &item.StartAt, &item.Status, &item.CreatedAt)
+	if err != nil {
+		return ClinicBookingView{}, err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return ClinicBookingView{}, fmt.Errorf("commit cancel clinic booking tx: %w", err)
+	}
+	return item, nil
 }
 
 func (r *PostgresRepository) GetConversationState(ctx context.Context, userID int64) (ConversationState, error) {

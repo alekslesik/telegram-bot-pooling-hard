@@ -80,6 +80,15 @@ type ClinicBooking struct {
 	CancelledAt    *time.Time
 }
 
+type ClinicBookingView struct {
+	ID            int64
+	SpecialtyName string
+	DoctorName    string
+	StartAt       time.Time
+	Status        string
+	CreatedAt     time.Time
+}
+
 type BookingRepository interface {
 	ListActiveServices(ctx context.Context) ([]Service, error)
 	GetServiceByID(ctx context.Context, serviceID int64) (Service, error)
@@ -100,6 +109,9 @@ type BookingRepository interface {
 	MarkSlotUnavailable(ctx context.Context, slotID int64) error
 	CreateClinicBooking(ctx context.Context, booking ClinicBooking) (ClinicBooking, error)
 	MarkDoctorSlotUnavailable(ctx context.Context, slotID int64) error
+	ListUserClinicBookings(ctx context.Context, userID int64, limit, offset int) ([]ClinicBookingView, error)
+	CountUserClinicBookings(ctx context.Context, userID int64) (int, error)
+	CancelClinicBooking(ctx context.Context, userID, bookingID int64) (ClinicBookingView, error)
 	GetConversationState(ctx context.Context, userID int64) (ConversationState, error)
 	SaveConversationState(ctx context.Context, state ConversationState) error
 	DeleteConversationState(ctx context.Context, userID int64) error
@@ -287,6 +299,55 @@ func (r *MemoryRepository) MarkDoctorSlotUnavailable(_ context.Context, slotID i
 	return nil
 }
 
+func (r *MemoryRepository) ListUserClinicBookings(_ context.Context, userID int64, limit, offset int) ([]ClinicBookingView, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []ClinicBookingView
+	for _, b := range r.clinicBooking {
+		if b.TelegramUserID != userID {
+			continue
+		}
+		out = append(out, r.toClinicBookingViewLocked(b))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].StartAt.Before(out[j].StartAt) })
+	start, end := pageBounds(len(out), limit, offset)
+	return append([]ClinicBookingView(nil), out[start:end]...), nil
+}
+
+func (r *MemoryRepository) CountUserClinicBookings(_ context.Context, userID int64) (int, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	count := 0
+	for _, b := range r.clinicBooking {
+		if b.TelegramUserID == userID {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (r *MemoryRepository) CancelClinicBooking(_ context.Context, userID, bookingID int64) (ClinicBookingView, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b, ok := r.clinicBooking[bookingID]
+	if !ok || b.TelegramUserID != userID {
+		return ClinicBookingView{}, ErrNotFound
+	}
+	if b.Status == "cancelled" {
+		return r.toClinicBookingViewLocked(b), nil
+	}
+	slot, ok := r.doctorSlots[b.DoctorSlotID]
+	if ok {
+		slot.IsAvailable = true
+		r.doctorSlots[b.DoctorSlotID] = slot
+	}
+	now := time.Now().UTC()
+	b.Status = "cancelled"
+	b.CancelledAt = &now
+	r.clinicBooking[bookingID] = b
+	return r.toClinicBookingViewLocked(b), nil
+}
+
 func (r *MemoryRepository) GetConversationState(_ context.Context, userID int64) (ConversationState, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -442,6 +503,20 @@ func (r *MemoryRepository) DeleteConversationState(_ context.Context, userID int
 	defer r.mu.Unlock()
 	delete(r.states, userID)
 	return nil
+}
+
+func (r *MemoryRepository) toClinicBookingViewLocked(b ClinicBooking) ClinicBookingView {
+	slot := r.doctorSlots[b.DoctorSlotID]
+	doc := r.doctors[b.DoctorID]
+	spec := r.specialties[b.SpecialtyID]
+	return ClinicBookingView{
+		ID:            b.ID,
+		SpecialtyName: spec.Name,
+		DoctorName:    doc.FullName,
+		StartAt:       slot.StartAt,
+		Status:        b.Status,
+		CreatedAt:     b.CreatedAt,
+	}
 }
 
 func pageSpecialties(items []Specialty, limit, offset int) []Specialty {
