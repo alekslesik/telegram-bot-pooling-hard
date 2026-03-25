@@ -78,37 +78,12 @@ type slogLogger interface {
 	Error(msg string, args ...any)
 }
 
-type commandRegistrar interface {
-	Request(tgbotapi.Chattable) (*tgbotapi.APIResponse, error)
-}
-
-func registerBotCommands(reg commandRegistrar, logger slogLogger) {
-	if _, err := reg.Request(setMyCommandsConfig()); err != nil {
-		logger.Error("failed to register bot commands", "err", err)
-	}
-}
-
 func tokenFromEnv() string {
 	return strings.TrimSpace(os.Getenv("TOKEN"))
 }
 
 func longPollTimeoutSeconds() int {
 	return 60
-}
-
-func setMyCommandsConfig() tgbotapi.SetMyCommandsConfig {
-	return tgbotapi.NewSetMyCommands(
-		tgbotapi.BotCommand{Command: "start", Description: "🚀 Старт"},
-		tgbotapi.BotCommand{Command: "book", Description: "🗓️ Запись на услугу"},
-		tgbotapi.BotCommand{Command: "cancel", Description: "❌ Отменить запись"},
-		tgbotapi.BotCommand{Command: "menu", Description: "📋 Демо-меню"},
-		tgbotapi.BotCommand{Command: "help", Description: "📋 Меню команд"},
-		tgbotapi.BotCommand{Command: "about", Description: "ℹ️ О боте"},
-		tgbotapi.BotCommand{Command: "usecases", Description: "💼 Примеры задач"},
-		tgbotapi.BotCommand{Command: "features", Description: "🧩 Возможности"},
-		tgbotapi.BotCommand{Command: "ping", Description: "✅ Проверка статуса"},
-		tgbotapi.BotCommand{Command: "echo", Description: "🗣️ Повторить текст"},
-	)
 }
 
 func main() {
@@ -135,8 +110,6 @@ func main() {
 	}
 
 	logAuthorized(logger, username, tg.Self.UserName)
-
-	registerBotCommands(tg, logger)
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = longPollTimeoutSeconds()
