@@ -89,6 +89,16 @@ type ClinicBookingView struct {
 	CreatedAt     time.Time
 }
 
+type UserDocument struct {
+	ID             int64
+	TelegramUserID int64
+	FileID         string
+	FileName       string
+	MimeType       string
+	FileSize       int
+	CreatedAt      time.Time
+}
+
 type BookingRepository interface {
 	ListActiveServices(ctx context.Context) ([]Service, error)
 	GetServiceByID(ctx context.Context, serviceID int64) (Service, error)
@@ -112,6 +122,8 @@ type BookingRepository interface {
 	ListUserClinicBookings(ctx context.Context, userID int64, limit, offset int) ([]ClinicBookingView, error)
 	CountUserClinicBookings(ctx context.Context, userID int64) (int, error)
 	CancelClinicBooking(ctx context.Context, userID, bookingID int64) (ClinicBookingView, error)
+	SaveUserDocument(ctx context.Context, doc UserDocument) (UserDocument, error)
+	ListRecentUserDocuments(ctx context.Context, userID int64, limit int) ([]UserDocument, error)
 	GetConversationState(ctx context.Context, userID int64) (ConversationState, error)
 	SaveConversationState(ctx context.Context, state ConversationState) error
 	DeleteConversationState(ctx context.Context, userID int64) error
@@ -129,10 +141,12 @@ type MemoryRepository struct {
 	doctorLinks   map[int64]map[int64]struct{}
 	doctorSlots   map[int64]DoctorSlot
 	clinicBooking map[int64]ClinicBooking
+	documents     map[int64]UserDocument
 	nextBookingID int64
 	nextServiceID int64
 	nextSlotID    int64
 	nextClinicID  int64
+	nextDocID     int64
 }
 
 func NewMemoryRepository() *MemoryRepository {
@@ -147,10 +161,12 @@ func NewMemoryRepository() *MemoryRepository {
 		doctorLinks:   make(map[int64]map[int64]struct{}),
 		doctorSlots:   make(map[int64]DoctorSlot),
 		clinicBooking: make(map[int64]ClinicBooking),
+		documents:     make(map[int64]UserDocument),
 		nextBookingID: 1,
 		nextServiceID: 1,
 		nextSlotID:    1,
 		nextClinicID:  1,
+		nextDocID:     1,
 	}
 	r.seed()
 	return r
@@ -356,6 +372,34 @@ func (r *MemoryRepository) CancelClinicBooking(_ context.Context, userID, bookin
 	b.CancelledAt = &now
 	r.clinicBooking[bookingID] = b
 	return r.toClinicBookingViewLocked(b), nil
+}
+
+func (r *MemoryRepository) SaveUserDocument(_ context.Context, doc UserDocument) (UserDocument, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	doc.ID = r.nextDocID
+	r.nextDocID++
+	if doc.CreatedAt.IsZero() {
+		doc.CreatedAt = time.Now().UTC()
+	}
+	r.documents[doc.ID] = doc
+	return doc, nil
+}
+
+func (r *MemoryRepository) ListRecentUserDocuments(_ context.Context, userID int64, limit int) ([]UserDocument, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []UserDocument
+	for _, d := range r.documents {
+		if d.TelegramUserID == userID {
+			out = append(out, d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return append([]UserDocument(nil), out...), nil
 }
 
 func (r *MemoryRepository) GetConversationState(_ context.Context, userID int64) (ConversationState, error) {
