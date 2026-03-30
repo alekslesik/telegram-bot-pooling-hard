@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestMemoryRepository_StateCRUD(t *testing.T) {
@@ -97,5 +98,84 @@ func TestMemoryRepository_ClientUpsertAndGet(t *testing.T) {
 	}
 	if got.FullName != "Jane Doe" || got.Phone != "+79990001122" {
 		t.Fatalf("unexpected client data: %+v", got)
+	}
+}
+
+func TestMemoryRepository_AdminDayTools_CloseOpenAndView(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+
+	var day time.Time
+	for _, slot := range repo.doctorSlots {
+		if slot.DoctorID == 1 && slot.SpecialtyID == 1 {
+			day = time.Date(slot.StartAt.Year(), slot.StartAt.Month(), slot.StartAt.Day(), 0, 0, 0, 0, time.UTC)
+			break
+		}
+	}
+	if day.IsZero() {
+		t.Fatal("expected at least one initial doctor slot for doctor_id=1 specialty_id=1")
+	}
+
+	// Ensure the day has multiple slots for a meaningful view/open/close test.
+	_, err := repo.GenerateDoctorSlots(ctx, 1, 1, day, 9*60, 12*60, 30)
+	if err != nil {
+		t.Fatalf("generate slots error: %v", err)
+	}
+
+	if _, err := repo.CloseDoctorDay(ctx, 1, 1, day); err != nil {
+		t.Fatalf("close day error: %v", err)
+	}
+
+	slots, err := repo.ListDoctorSlotsForDay(ctx, 1, 1, day)
+	if err != nil {
+		t.Fatalf("list slots error: %v", err)
+	}
+	if len(slots) < 2 {
+		t.Fatalf("expected >=2 slots on the day, got %d", len(slots))
+	}
+
+	// Book the earliest slot as confirmed.
+	bookedSlotID := slots[0].ID
+	if _, err := repo.CreateClinicBooking(ctx, ClinicBooking{
+		TelegramUserID: 1,
+		SpecialtyID:    1,
+		DoctorID:       1,
+		DoctorSlotID:   bookedSlotID,
+		Status:         "confirmed",
+	}); err != nil {
+		t.Fatalf("create clinic booking error: %v", err)
+	}
+
+	updated, err := repo.OpenDoctorDay(ctx, 1, 1, day)
+	if err != nil {
+		t.Fatalf("open day error: %v", err)
+	}
+
+	// After closing, all slots were unavailable; open should re-enable all except the booked one.
+	if updated != len(slots)-1 {
+		t.Fatalf("unexpected updated count: want %d got %d", len(slots)-1, updated)
+	}
+
+	after, err := repo.ListDoctorSlotsForDay(ctx, 1, 1, day)
+	if err != nil {
+		t.Fatalf("list slots after open error: %v", err)
+	}
+
+	for _, s := range after {
+		if s.ID == bookedSlotID {
+			if !s.IsBooked {
+				t.Fatalf("expected booked slot to be marked as booked (id=%d)", s.ID)
+			}
+			if s.IsAvailable {
+				t.Fatalf("expected booked slot to remain unavailable (id=%d)", s.ID)
+			}
+		} else {
+			if s.IsBooked {
+				t.Fatalf("expected slot not to be booked (id=%d)", s.ID)
+			}
+			if !s.IsAvailable {
+				t.Fatalf("expected slot to become available (id=%d)", s.ID)
+			}
+		}
 	}
 }

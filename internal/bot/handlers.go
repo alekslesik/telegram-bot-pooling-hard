@@ -46,6 +46,7 @@ var commandButtons = map[string]string{
 	"📅 Мои записи":         "mybookings",
 	"❌ Отмена записи":      "cancelbooking",
 	"📤 Загрузить документ": "uploaddoc",
+	"🛠️ Админ":             "admin",
 	"🆘 Помощь":             "help",
 }
 
@@ -87,6 +88,9 @@ func commandKeyboard() tgbotapi.ReplyKeyboardMarkup {
 		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("📤 Загрузить документ"),
 			tgbotapi.NewKeyboardButton("🆘 Помощь"),
+		),
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("🛠️ Админ"),
 		),
 	)
 }
@@ -170,6 +174,13 @@ func (h Handlers) commandRegistry() map[string]Command {
 				return "pong ✅ Бот запущен и готов работать с клиентами."
 			},
 		},
+		"admin": {
+			Name:        "admin",
+			Description: "админ-панель для управления расписанием",
+			BuildText: func(_ *tgbotapi.Message) string {
+				return "Открываю админ-панель..."
+			},
+		},
 		"echo": {
 			Name:        "echo",
 			Description: "повторить ваш текст (пример простой команды)",
@@ -193,7 +204,7 @@ func (h Handlers) commandRegistry() map[string]Command {
 				"*Что я умею прямо сейчас:*",
 			}
 
-			order := []string{"start", "book", "help", "ping", "echo"}
+			order := []string{"start", "book", "admin", "help", "ping", "echo"}
 			for _, name := range order {
 				c := commands[name]
 				label := "/" + c.Name
@@ -275,6 +286,23 @@ func (h Handlers) sendCommandReply(chatID int64, cmdName string, msg *tgbotapi.M
 		reply.ReplyMarkup = commandKeyboard()
 		if _, err := h.Bot.Send(reply); err != nil {
 			h.Logger.Error("failed to send upload-doc prompt", "err", err)
+		}
+		return
+	}
+	if h.Booking != nil && cmdName == "admin" {
+		ok, text, err := h.Booking.StartAdmin(context.Background(), telegramUserID(msg))
+		if err != nil {
+			h.Logger.Error("failed to open admin panel", "err", err)
+			text = "Не удалось открыть админ-панель."
+		}
+		reply := tgbotapi.NewMessage(chatID, text)
+		if ok {
+			reply.ReplyMarkup = h.adminKeyboard()
+		} else {
+			reply.ReplyMarkup = commandKeyboard()
+		}
+		if _, err := h.Bot.Send(reply); err != nil {
+			h.Logger.Error("failed to send admin reply", "err", err)
 		}
 		return
 	}
@@ -364,6 +392,13 @@ func (h Handlers) HandleCallback(q *tgbotapi.CallbackQuery) {
 		return
 	}
 	data := strings.TrimSpace(q.Data)
+	if strings.HasPrefix(data, "admin:") {
+		if _, err := h.Bot.Request(tgbotapi.NewCallback(q.ID, "")); err != nil {
+			h.Logger.Error("failed to answer admin callback", "err", err)
+		}
+		h.handleAdminCallback(q)
+		return
+	}
 	if strings.HasPrefix(data, "my:") {
 		if _, err := h.Bot.Request(tgbotapi.NewCallback(q.ID, "")); err != nil {
 			h.Logger.Error("failed to answer my-bookings callback", "err", err)
@@ -722,4 +757,91 @@ func (h Handlers) handleIncomingDocument(chatID, userID int64, fileID, fileName,
 	if _, err := h.Bot.Send(reply); err != nil {
 		h.Logger.Error("failed to send upload result", "err", err)
 	}
+}
+
+func (h Handlers) handleAdminCallback(q *tgbotapi.CallbackQuery) {
+	if q == nil {
+		return
+	}
+	parts := strings.Split(strings.TrimSpace(q.Data), ":")
+	if len(parts) < 2 || parts[0] != "admin" || h.Booking == nil {
+		return
+	}
+
+	// For our chat-based bot the Telegram user id is the requester.
+	userID := q.Message.Chat.ID
+	if q.From != nil {
+		userID = q.From.ID
+	}
+	chatID := q.Message.Chat.ID
+
+	var (
+		text string
+		err  error
+	)
+
+	switch parts[1] {
+	case "addspec":
+		text, err = h.Booking.StartAdminAddSpecialty(context.Background(), userID)
+	case "adddoc":
+		text, err = h.Booking.StartAdminAddDoctor(context.Background(), userID)
+	case "link":
+		text, err = h.Booking.StartAdminLinkDoctorSpecialty(context.Background(), userID)
+	case "slots":
+		text, err = h.Booking.StartAdminGenerateSlots(context.Background(), userID)
+	case "closeday":
+		text, err = h.Booking.StartAdminCloseDay(context.Background(), userID)
+	case "openday":
+		text, err = h.Booking.StartAdminOpenDay(context.Background(), userID)
+	case "dayslots":
+		text, err = h.Booking.StartAdminDaySlots(context.Background(), userID)
+	case "close":
+		text = "Админ-панель закрыта."
+	default:
+		return
+	}
+
+	if err != nil {
+		h.Logger.Error("admin action failed", "action", parts[1], "err", err)
+		text = "Не удалось выполнить админ-действие."
+	}
+
+	reply := tgbotapi.NewMessage(chatID, text)
+	reply.ReplyMarkup = commandKeyboard()
+	if parts[1] == "close" {
+		reply.ReplyMarkup = commandKeyboard()
+	}
+	if _, sendErr := h.Bot.Send(reply); sendErr != nil {
+		h.Logger.Error("failed to send admin action reply", "err", sendErr)
+	}
+}
+
+func (h Handlers) adminKeyboard() *tgbotapi.InlineKeyboardMarkup {
+	inline := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Добавить специализацию", "admin:addspec"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Добавить врача", "admin:adddoc"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Привязать врач-специализация", "admin:link"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Сгенерировать слоты на день", "admin:slots"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Закрыть день", "admin:closeday"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Открыть день", "admin:openday"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Слоты на день", "admin:dayslots"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✖️ Закрыть", "admin:close"),
+		),
+	)
+	return &inline
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -69,6 +70,16 @@ type DoctorSlot struct {
 	IsAvailable bool
 }
 
+// DoctorSlotDayView represents a single doctor_slot during an admin view of a day.
+// IsAvailable reflects the current "is_available" flag in doctor_slots.
+// IsBooked reflects whether there is an existing confirmed clinic_bookings row.
+type DoctorSlotDayView struct {
+	ID          int64
+	StartAt     time.Time
+	IsAvailable bool
+	IsBooked    bool
+}
+
 type ClinicBooking struct {
 	ID             int64
 	TelegramUserID int64
@@ -99,6 +110,14 @@ type UserDocument struct {
 	CreatedAt      time.Time
 }
 
+type AdminAuditLog struct {
+	ID          int64
+	AdminUserID int64
+	Action      string
+	Details     string
+	CreatedAt   time.Time
+}
+
 type BookingRepository interface {
 	ListActiveServices(ctx context.Context) ([]Service, error)
 	GetServiceByID(ctx context.Context, serviceID int64) (Service, error)
@@ -124,6 +143,21 @@ type BookingRepository interface {
 	CancelClinicBooking(ctx context.Context, userID, bookingID int64) (ClinicBookingView, error)
 	SaveUserDocument(ctx context.Context, doc UserDocument) (UserDocument, error)
 	ListRecentUserDocuments(ctx context.Context, userID int64, limit int) ([]UserDocument, error)
+
+	IsAdmin(ctx context.Context, userID int64) (bool, error)
+	ListAllSpecialties(ctx context.Context) ([]Specialty, error)
+	ListAllDoctors(ctx context.Context) ([]Doctor, error)
+	CreateSpecialty(ctx context.Context, name string, sortOrder int) (Specialty, error)
+	CreateDoctor(ctx context.Context, fullName string) (Doctor, error)
+	LinkDoctorToSpecialty(ctx context.Context, doctorID, specialtyID int64) error
+	GenerateDoctorSlots(ctx context.Context, doctorID, specialtyID int64, date time.Time, startMinute, endMinute, stepMinutes int) (int, error)
+	LogAdminAction(ctx context.Context, adminUserID int64, action, details string) error
+
+	// Day tools (admin): close/open availability and view slot utilization.
+	CloseDoctorDay(ctx context.Context, doctorID, specialtyID int64, date time.Time) (int, error)
+	OpenDoctorDay(ctx context.Context, doctorID, specialtyID int64, date time.Time) (int, error)
+	ListDoctorSlotsForDay(ctx context.Context, doctorID, specialtyID int64, date time.Time) ([]DoctorSlotDayView, error)
+
 	GetConversationState(ctx context.Context, userID int64) (ConversationState, error)
 	SaveConversationState(ctx context.Context, state ConversationState) error
 	DeleteConversationState(ctx context.Context, userID int64) error
@@ -147,6 +181,10 @@ type MemoryRepository struct {
 	nextSlotID    int64
 	nextClinicID  int64
 	nextDocID     int64
+
+	admins       map[int64]struct{}
+	adminLogs    []AdminAuditLog
+	nextAdminLog int64
 }
 
 func NewMemoryRepository() *MemoryRepository {
@@ -167,6 +205,9 @@ func NewMemoryRepository() *MemoryRepository {
 		nextSlotID:    1,
 		nextClinicID:  1,
 		nextDocID:     1,
+		admins:        make(map[int64]struct{}),
+		adminLogs:     []AdminAuditLog{},
+		nextAdminLog:  1,
 	}
 	r.seed()
 	return r
@@ -400,6 +441,256 @@ func (r *MemoryRepository) ListRecentUserDocuments(_ context.Context, userID int
 		out = out[:limit]
 	}
 	return append([]UserDocument(nil), out...), nil
+}
+
+func (r *MemoryRepository) IsAdmin(_ context.Context, userID int64) (bool, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.admins[userID]
+	return ok, nil
+}
+
+func (r *MemoryRepository) ListAllSpecialties(_ context.Context) ([]Specialty, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]Specialty, 0, len(r.specialties))
+	for _, s := range r.specialties {
+		out = append(out, s)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].SortOrder == out[j].SortOrder {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].SortOrder < out[j].SortOrder
+	})
+	return out, nil
+}
+
+func (r *MemoryRepository) ListAllDoctors(_ context.Context) ([]Doctor, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]Doctor, 0, len(r.doctors))
+	for _, d := range r.doctors {
+		out = append(out, d)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+func (r *MemoryRepository) CreateSpecialty(_ context.Context, name string, sortOrder int) (Specialty, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	name = strings.TrimSpace(name)
+	for _, s := range r.specialties {
+		if strings.EqualFold(s.Name, name) {
+			// update instead of creating duplicates
+			s.SortOrder = sortOrder
+			s.IsActive = true
+			r.specialties[s.ID] = s
+			return s, nil
+		}
+	}
+	var maxID int64
+	for id := range r.specialties {
+		if id > maxID {
+			maxID = id
+		}
+	}
+	s := Specialty{ID: maxID + 1, Name: name, SortOrder: sortOrder, IsActive: true}
+	r.specialties[s.ID] = s
+	return s, nil
+}
+
+func (r *MemoryRepository) CreateDoctor(_ context.Context, fullName string) (Doctor, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	fullName = strings.TrimSpace(fullName)
+	for _, d := range r.doctors {
+		if strings.EqualFold(d.FullName, fullName) {
+			d.IsActive = true
+			r.doctors[d.ID] = d
+			return d, nil
+		}
+	}
+	var maxID int64
+	for id := range r.doctors {
+		if id > maxID {
+			maxID = id
+		}
+	}
+	d := Doctor{ID: maxID + 1, FullName: fullName, IsActive: true}
+	r.doctors[d.ID] = d
+	return d, nil
+}
+
+func (r *MemoryRepository) LinkDoctorToSpecialty(_ context.Context, doctorID, specialtyID int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.doctors[doctorID]; !ok {
+		return ErrNotFound
+	}
+	if _, ok := r.specialties[specialtyID]; !ok {
+		return ErrNotFound
+	}
+	if _, ok := r.doctorLinks[doctorID]; !ok {
+		r.doctorLinks[doctorID] = make(map[int64]struct{})
+	}
+	r.doctorLinks[doctorID][specialtyID] = struct{}{}
+	return nil
+}
+
+func (r *MemoryRepository) GenerateDoctorSlots(_ context.Context, doctorID, specialtyID int64, date time.Time, startMinute, endMinute, stepMinutes int) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if stepMinutes <= 0 || endMinute <= startMinute {
+		return 0, nil
+	}
+	base := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
+	var inserted int
+
+	var maxID int64
+	for id := range r.doctorSlots {
+		if id > maxID {
+			maxID = id
+		}
+	}
+
+	for m := startMinute; m < endMinute; m += stepMinutes {
+		at := base.Add(time.Duration(m) * time.Minute)
+		already := false
+		for _, s := range r.doctorSlots {
+			if s.DoctorID == doctorID && s.SpecialtyID == specialtyID && s.StartAt.Equal(at) {
+				already = true
+				break
+			}
+		}
+		if already {
+			continue
+		}
+		maxID++
+		r.doctorSlots[maxID] = DoctorSlot{
+			ID:          maxID,
+			DoctorID:    doctorID,
+			SpecialtyID: specialtyID,
+			StartAt:     at,
+			IsAvailable: true,
+		}
+		inserted++
+	}
+
+	return inserted, nil
+}
+
+func (r *MemoryRepository) CloseDoctorDay(_ context.Context, doctorID, specialtyID int64, date time.Time) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	date = time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
+	updated := 0
+
+	for id, slot := range r.doctorSlots {
+		if slot.DoctorID != doctorID || slot.SpecialtyID != specialtyID {
+			continue
+		}
+		slotDay := time.Date(slot.StartAt.Year(), slot.StartAt.Month(), slot.StartAt.Day(), 0, 0, 0, 0, time.UTC)
+		if slotDay.Equal(date) {
+			if slot.IsAvailable {
+				updated++
+			}
+			slot.IsAvailable = false
+			r.doctorSlots[id] = slot
+		}
+	}
+
+	return updated, nil
+}
+
+func (r *MemoryRepository) OpenDoctorDay(_ context.Context, doctorID, specialtyID int64, date time.Time) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	date = time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
+	updated := 0
+
+	for id, slot := range r.doctorSlots {
+		if slot.DoctorID != doctorID || slot.SpecialtyID != specialtyID {
+			continue
+		}
+		slotDay := time.Date(slot.StartAt.Year(), slot.StartAt.Month(), slot.StartAt.Day(), 0, 0, 0, 0, time.UTC)
+		if !slotDay.Equal(date) {
+			continue
+		}
+
+		isBooked := false
+		for _, b := range r.clinicBooking {
+			if b.DoctorSlotID == id && b.Status == "confirmed" {
+				isBooked = true
+				break
+			}
+		}
+		if isBooked {
+			continue
+		}
+
+		if !slot.IsAvailable {
+			updated++
+		}
+		slot.IsAvailable = true
+		r.doctorSlots[id] = slot
+	}
+
+	return updated, nil
+}
+
+func (r *MemoryRepository) ListDoctorSlotsForDay(_ context.Context, doctorID, specialtyID int64, date time.Time) ([]DoctorSlotDayView, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	date = time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
+
+	var out []DoctorSlotDayView
+	for _, slot := range r.doctorSlots {
+		if slot.DoctorID != doctorID || slot.SpecialtyID != specialtyID {
+			continue
+		}
+		slotDay := time.Date(slot.StartAt.Year(), slot.StartAt.Month(), slot.StartAt.Day(), 0, 0, 0, 0, time.UTC)
+		if !slotDay.Equal(date) {
+			continue
+		}
+
+		isBooked := false
+		for _, b := range r.clinicBooking {
+			if b.DoctorSlotID == slot.ID && b.Status == "confirmed" {
+				isBooked = true
+				break
+			}
+		}
+
+		out = append(out, DoctorSlotDayView{
+			ID:          slot.ID,
+			StartAt:     slot.StartAt,
+			IsAvailable: slot.IsAvailable,
+			IsBooked:    isBooked,
+		})
+	}
+
+	// Stable ordering by start time.
+	sort.Slice(out, func(i, j int) bool { return out[i].StartAt.Before(out[j].StartAt) })
+	return out, nil
+}
+
+func (r *MemoryRepository) LogAdminAction(_ context.Context, adminUserID int64, action, details string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.adminLogs = append(r.adminLogs, AdminAuditLog{
+		ID:          r.nextAdminLog,
+		AdminUserID: adminUserID,
+		Action:      action,
+		Details:     details,
+		CreatedAt:   time.Now().UTC(),
+	})
+	r.nextAdminLog++
+	return nil
 }
 
 func (r *MemoryRepository) GetConversationState(_ context.Context, userID int64) (ConversationState, error) {
