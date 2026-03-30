@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -440,6 +441,122 @@ func (r *PostgresRepository) ListRecentUserDocuments(ctx context.Context, userID
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+func (r *PostgresRepository) IsAdmin(ctx context.Context, userID int64) (bool, error) {
+	var ok bool
+	err := r.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM admins
+			WHERE telegram_user_id = $1 AND is_active = TRUE
+		)`, userID).Scan(&ok)
+	return ok, err
+}
+
+func (r *PostgresRepository) ListAllSpecialties(ctx context.Context) ([]Specialty, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, name, sort_order, is_active
+		FROM specialties
+		ORDER BY sort_order ASC, id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Specialty
+	for rows.Next() {
+		var s Specialty
+		if err := rows.Scan(&s.ID, &s.Name, &s.SortOrder, &s.IsActive); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+func (r *PostgresRepository) ListAllDoctors(ctx context.Context) ([]Doctor, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, full_name, is_active
+		FROM doctors
+		ORDER BY id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Doctor
+	for rows.Next() {
+		var d Doctor
+		if err := rows.Scan(&d.ID, &d.FullName, &d.IsActive); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (r *PostgresRepository) CreateSpecialty(ctx context.Context, name string, sortOrder int) (Specialty, error) {
+	name = strings.TrimSpace(name)
+	var s Specialty
+	err := r.db.QueryRowContext(ctx, `
+		INSERT INTO specialties (name, sort_order, is_active)
+		VALUES ($1, $2, TRUE)
+		ON CONFLICT (name) DO UPDATE
+		SET sort_order = EXCLUDED.sort_order,
+		    is_active = TRUE
+		RETURNING id, name, sort_order, is_active`, name, sortOrder).
+		Scan(&s.ID, &s.Name, &s.SortOrder, &s.IsActive)
+	return s, err
+}
+
+func (r *PostgresRepository) CreateDoctor(ctx context.Context, fullName string) (Doctor, error) {
+	fullName = strings.TrimSpace(fullName)
+	var d Doctor
+	err := r.db.QueryRowContext(ctx, `
+		INSERT INTO doctors (full_name, is_active)
+		VALUES ($1, TRUE)
+		ON CONFLICT (full_name) DO UPDATE
+		SET is_active = TRUE
+		RETURNING id, full_name, is_active`, fullName).
+		Scan(&d.ID, &d.FullName, &d.IsActive)
+	return d, err
+}
+
+func (r *PostgresRepository) LinkDoctorToSpecialty(ctx context.Context, doctorID, specialtyID int64) error {
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO doctor_specialties (doctor_id, specialty_id)
+		VALUES ($1, $2)
+		ON CONFLICT (doctor_id, specialty_id) DO NOTHING`, doctorID, specialtyID)
+	return err
+}
+
+func (r *PostgresRepository) GenerateDoctorSlots(ctx context.Context, doctorID, specialtyID int64, date time.Time, startMinute, endMinute, stepMinutes int) (int, error) {
+	base := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
+	startAt := base.Add(time.Duration(startMinute) * time.Minute)
+	endAt := base.Add(time.Duration(endMinute) * time.Minute)
+
+	// We treat endAt as exclusive (endMinute not included).
+	var count int
+	err := r.db.QueryRowContext(ctx, `
+		WITH ins AS (
+			INSERT INTO doctor_slots (doctor_id, specialty_id, start_at, is_available)
+			SELECT $1, $2, gs, TRUE
+			FROM generate_series(
+				$3::timestamptz,
+				$4::timestamptz - make_interval(mins => $5::int),
+				make_interval(mins => $5::int)
+			) gs
+			ON CONFLICT (doctor_id, specialty_id, start_at) DO NOTHING
+			RETURNING 1
+		)
+		SELECT COUNT(*) FROM ins
+	`, doctorID, specialtyID, startAt, endAt, stepMinutes).Scan(&count)
+	return count, err
+}
+
+func (r *PostgresRepository) LogAdminAction(ctx context.Context, adminUserID int64, action, details string) error {
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO admin_audit_logs (admin_user_id, action, details)
+		VALUES ($1, $2, $3)`, adminUserID, action, details)
+	return err
 }
 
 func (r *PostgresRepository) GetConversationState(ctx context.Context, userID int64) (ConversationState, error) {
