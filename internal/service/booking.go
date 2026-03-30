@@ -23,6 +23,9 @@ const (
 	StateAdminAddDoctor           = "admin_add_doctor"
 	StateAdminLinkDoctorSpecialty = "admin_link_doctor_specialty"
 	StateAdminGenerateSlots       = "admin_generate_slots"
+	StateAdminCloseDay            = "admin_close_day"
+	StateAdminOpenDay             = "admin_open_day"
+	StateAdminDaySlots            = "admin_day_slots"
 )
 
 type statePayload struct {
@@ -95,6 +98,12 @@ func (s *BookingService) HandleText(ctx context.Context, userID int64, text stri
 		return s.handleAdminLinkDoctorSpecialty(ctx, userID, text)
 	case StateAdminGenerateSlots:
 		return s.handleAdminGenerateSlots(ctx, userID, text)
+	case StateAdminCloseDay:
+		return s.handleAdminCloseDay(ctx, userID, text)
+	case StateAdminOpenDay:
+		return s.handleAdminOpenDay(ctx, userID, text)
+	case StateAdminDaySlots:
+		return s.handleAdminDaySlots(ctx, userID, text)
 	default:
 		return false, "", nil
 	}
@@ -180,6 +189,48 @@ func (s *BookingService) StartAdminGenerateSlots(ctx context.Context, userID int
 		return "", err
 	}
 	return dicts + "\n\nВведите параметры: `doctor_id|specialty_id|YYYY-MM-DD|09:00|18:00|30`.\nШаг задайте в минутах (например 30).", nil
+}
+
+func (s *BookingService) StartAdminCloseDay(ctx context.Context, userID int64) (string, error) {
+	ok, err := s.repo.IsAdmin(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "Нет доступа к админ-панели.", nil
+	}
+	if err := s.saveState(ctx, userID, StateAdminCloseDay, statePayload{}); err != nil {
+		return "", err
+	}
+	return "Закрыть день (сделать слоты недоступными).\nВведите: doctor_id|specialty_id|YYYY-MM-DD.\nПример: 2|5|2026-03-30", nil
+}
+
+func (s *BookingService) StartAdminOpenDay(ctx context.Context, userID int64) (string, error) {
+	ok, err := s.repo.IsAdmin(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "Нет доступа к админ-панели.", nil
+	}
+	if err := s.saveState(ctx, userID, StateAdminOpenDay, statePayload{}); err != nil {
+		return "", err
+	}
+	return "Открыть день (включить слоты, если они не заняты).\nВведите: doctor_id|specialty_id|YYYY-MM-DD.\nПример: 2|5|2026-03-30", nil
+}
+
+func (s *BookingService) StartAdminDaySlots(ctx context.Context, userID int64) (string, error) {
+	ok, err := s.repo.IsAdmin(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "Нет доступа к админ-панели.", nil
+	}
+	if err := s.saveState(ctx, userID, StateAdminDaySlots, statePayload{}); err != nil {
+		return "", err
+	}
+	return "Показать слоты на день и загрузку.\nВведите: doctor_id|specialty_id|YYYY-MM-DD.\nПример: 2|5|2026-03-30", nil
 }
 
 func (s *BookingService) handleAdminAddSpecialty(ctx context.Context, userID int64, text string) (bool, string, error) {
@@ -282,6 +333,93 @@ func (s *BookingService) handleAdminGenerateSlots(ctx context.Context, userID in
 	_ = s.repo.LogAdminAction(ctx, userID, "generate_slots", fmt.Sprintf("doctor_id=%d specialty_id=%d date=%s inserted=%d", doctorID, specialtyID, date.Format("2006-01-02"), inserted))
 	_ = s.repo.DeleteConversationState(ctx, userID)
 	return true, fmt.Sprintf("Готово. Добавлено слотов: %d", inserted), nil
+}
+
+func parseAdminDayInput(raw string) (doctorID, specialtyID int64, date time.Time, err error) {
+	parts := strings.Split(strings.TrimSpace(raw), "|")
+	if len(parts) != 3 {
+		return 0, 0, time.Time{}, fmt.Errorf("invalid format")
+	}
+	doctorID, err = strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+	if err != nil {
+		return 0, 0, time.Time{}, err
+	}
+	specialtyID, err = strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+	if err != nil {
+		return 0, 0, time.Time{}, err
+	}
+	date, err = time.Parse("2006-01-02", strings.TrimSpace(parts[2]))
+	if err != nil {
+		return 0, 0, time.Time{}, err
+	}
+	return doctorID, specialtyID, date, nil
+}
+
+func (s *BookingService) handleAdminCloseDay(ctx context.Context, userID int64, text string) (bool, string, error) {
+	doctorID, specialtyID, date, err := parseAdminDayInput(text)
+	if err != nil {
+		return true, "Неверный формат. Используйте: doctor_id|specialty_id|YYYY-MM-DD", nil
+	}
+	updated, err := s.repo.CloseDoctorDay(ctx, doctorID, specialtyID, date)
+	if err != nil {
+		return true, "", err
+	}
+	_ = s.repo.LogAdminAction(ctx, userID, "close_doctor_day", fmt.Sprintf("doctor_id=%d specialty_id=%d date=%s updated=%d", doctorID, specialtyID, date.Format("2006-01-02"), updated))
+	_ = s.repo.DeleteConversationState(ctx, userID)
+	return true, fmt.Sprintf("День закрыт. Изменено слотов: %d", updated), nil
+}
+
+func (s *BookingService) handleAdminOpenDay(ctx context.Context, userID int64, text string) (bool, string, error) {
+	doctorID, specialtyID, date, err := parseAdminDayInput(text)
+	if err != nil {
+		return true, "Неверный формат. Используйте: doctor_id|specialty_id|YYYY-MM-DD", nil
+	}
+	updated, err := s.repo.OpenDoctorDay(ctx, doctorID, specialtyID, date)
+	if err != nil {
+		return true, "", err
+	}
+	_ = s.repo.LogAdminAction(ctx, userID, "open_doctor_day", fmt.Sprintf("doctor_id=%d specialty_id=%d date=%s updated=%d", doctorID, specialtyID, date.Format("2006-01-02"), updated))
+	_ = s.repo.DeleteConversationState(ctx, userID)
+	return true, fmt.Sprintf("День открыт. Включено слотов: %d", updated), nil
+}
+
+func (s *BookingService) handleAdminDaySlots(ctx context.Context, userID int64, text string) (bool, string, error) {
+	doctorID, specialtyID, date, err := parseAdminDayInput(text)
+	if err != nil {
+		return true, "Неверный формат. Используйте: doctor_id|specialty_id|YYYY-MM-DD", nil
+	}
+
+	slots, err := s.repo.ListDoctorSlotsForDay(ctx, doctorID, specialtyID, date)
+	if err != nil {
+		return true, "", err
+	}
+
+	var free, closed, busy int
+	var b strings.Builder
+	dateStr := date.Format("2006-01-02")
+
+	b.WriteString(fmt.Sprintf("Слоты на %s\nВрач ID: %d | Специализация ID: %d\n", dateStr, doctorID, specialtyID))
+
+	for _, s := range slots {
+		if s.IsBooked {
+			busy++
+			fmt.Fprintf(&b, "%s — занято (ID %d)\n", s.StartAt.Format("15:04"), s.ID)
+			continue
+		}
+		if s.IsAvailable {
+			free++
+			fmt.Fprintf(&b, "%s — свободно (ID %d)\n", s.StartAt.Format("15:04"), s.ID)
+		} else {
+			closed++
+			fmt.Fprintf(&b, "%s — закрыто (ID %d)\n", s.StartAt.Format("15:04"), s.ID)
+		}
+	}
+
+	b.WriteString(fmt.Sprintf("\nИтого: свободно=%d, закрыто=%d, занято=%d", free, closed, busy))
+
+	_ = s.repo.LogAdminAction(ctx, userID, "view_doctor_day_slots", fmt.Sprintf("doctor_id=%d specialty_id=%d date=%s slots=%d free=%d closed=%d busy=%d", doctorID, specialtyID, dateStr, len(slots), free, closed, busy))
+	_ = s.repo.DeleteConversationState(ctx, userID)
+	return true, strings.TrimSpace(b.String()), nil
 }
 
 func (s *BookingService) adminDictionaries(ctx context.Context) (string, error) {

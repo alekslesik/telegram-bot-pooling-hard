@@ -552,6 +552,89 @@ func (r *PostgresRepository) GenerateDoctorSlots(ctx context.Context, doctorID, 
 	return count, err
 }
 
+func (r *PostgresRepository) CloseDoctorDay(ctx context.Context, doctorID, specialtyID int64, date time.Time) (int, error) {
+	base := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE doctor_slots
+		SET is_available = FALSE
+		WHERE doctor_id = $1
+		  AND specialty_id = $2
+		  AND start_at >= $3
+		  AND start_at < ($3 + INTERVAL '1 day')
+	`, doctorID, specialtyID, base)
+	if err != nil {
+		return 0, err
+	}
+	aff, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(aff), nil
+}
+
+func (r *PostgresRepository) OpenDoctorDay(ctx context.Context, doctorID, specialtyID int64, date time.Time) (int, error) {
+	base := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE doctor_slots ds
+		SET is_available = TRUE
+		WHERE ds.doctor_id = $1
+		  AND ds.specialty_id = $2
+		  AND ds.start_at >= $3
+		  AND ds.start_at < ($3 + INTERVAL '1 day')
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM clinic_bookings cb
+			WHERE cb.doctor_slot_id = ds.id
+			  AND cb.status = 'confirmed'
+		  )
+	`, doctorID, specialtyID, base)
+	if err != nil {
+		return 0, err
+	}
+	aff, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(aff), nil
+}
+
+func (r *PostgresRepository) ListDoctorSlotsForDay(ctx context.Context, doctorID, specialtyID int64, date time.Time) ([]DoctorSlotDayView, error) {
+	base := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
+
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT
+			ds.id,
+			ds.start_at,
+			ds.is_available,
+			EXISTS (
+				SELECT 1
+				FROM clinic_bookings cb
+				WHERE cb.doctor_slot_id = ds.id
+				  AND cb.status = 'confirmed'
+			) AS is_booked
+		FROM doctor_slots ds
+		WHERE ds.doctor_id = $1
+		  AND ds.specialty_id = $2
+		  AND ds.start_at >= $3
+		  AND ds.start_at < ($3 + INTERVAL '1 day')
+		ORDER BY ds.start_at ASC
+	`, doctorID, specialtyID, base)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []DoctorSlotDayView
+	for rows.Next() {
+		var v DoctorSlotDayView
+		if err := rows.Scan(&v.ID, &v.StartAt, &v.IsAvailable, &v.IsBooked); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
 func (r *PostgresRepository) LogAdminAction(ctx context.Context, adminUserID int64, action, details string) error {
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO admin_audit_logs (admin_user_id, action, details)

@@ -789,6 +789,12 @@ func (h Handlers) handleAdminCallback(q *tgbotapi.CallbackQuery) {
 		text, err = h.Booking.StartAdminLinkDoctorSpecialty(context.Background(), userID)
 	case "slots":
 		text, err = h.Booking.StartAdminGenerateSlots(context.Background(), userID)
+	case "closeday":
+		text, err = h.Booking.StartAdminCloseDay(context.Background(), userID)
+	case "openday":
+		text, err = h.Booking.StartAdminOpenDay(context.Background(), userID)
+	case "dayslots":
+		text, err = h.Booking.StartAdminDaySlots(context.Background(), userID)
 	case "close":
 		text = "Админ-панель закрыта."
 	default:
@@ -823,6 +829,15 @@ func (h Handlers) adminKeyboard() *tgbotapi.InlineKeyboardMarkup {
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("Сгенерировать слоты на день", "admin:slots"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Закрыть день", "admin:closeday"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Открыть день", "admin:openday"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Слоты на день", "admin:dayslots"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("✖️ Закрыть", "admin:close"),

@@ -70,6 +70,16 @@ type DoctorSlot struct {
 	IsAvailable bool
 }
 
+// DoctorSlotDayView represents a single doctor_slot during an admin view of a day.
+// IsAvailable reflects the current "is_available" flag in doctor_slots.
+// IsBooked reflects whether there is an existing confirmed clinic_bookings row.
+type DoctorSlotDayView struct {
+	ID          int64
+	StartAt     time.Time
+	IsAvailable bool
+	IsBooked    bool
+}
+
 type ClinicBooking struct {
 	ID             int64
 	TelegramUserID int64
@@ -142,6 +152,11 @@ type BookingRepository interface {
 	LinkDoctorToSpecialty(ctx context.Context, doctorID, specialtyID int64) error
 	GenerateDoctorSlots(ctx context.Context, doctorID, specialtyID int64, date time.Time, startMinute, endMinute, stepMinutes int) (int, error)
 	LogAdminAction(ctx context.Context, adminUserID int64, action, details string) error
+
+	// Day tools (admin): close/open availability and view slot utilization.
+	CloseDoctorDay(ctx context.Context, doctorID, specialtyID int64, date time.Time) (int, error)
+	OpenDoctorDay(ctx context.Context, doctorID, specialtyID int64, date time.Time) (int, error)
+	ListDoctorSlotsForDay(ctx context.Context, doctorID, specialtyID int64, date time.Time) ([]DoctorSlotDayView, error)
 
 	GetConversationState(ctx context.Context, userID int64) (ConversationState, error)
 	SaveConversationState(ctx context.Context, state ConversationState) error
@@ -564,6 +579,104 @@ func (r *MemoryRepository) GenerateDoctorSlots(_ context.Context, doctorID, spec
 	}
 
 	return inserted, nil
+}
+
+func (r *MemoryRepository) CloseDoctorDay(_ context.Context, doctorID, specialtyID int64, date time.Time) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	date = time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
+	updated := 0
+
+	for id, slot := range r.doctorSlots {
+		if slot.DoctorID != doctorID || slot.SpecialtyID != specialtyID {
+			continue
+		}
+		slotDay := time.Date(slot.StartAt.Year(), slot.StartAt.Month(), slot.StartAt.Day(), 0, 0, 0, 0, time.UTC)
+		if slotDay.Equal(date) {
+			if slot.IsAvailable {
+				updated++
+			}
+			slot.IsAvailable = false
+			r.doctorSlots[id] = slot
+		}
+	}
+
+	return updated, nil
+}
+
+func (r *MemoryRepository) OpenDoctorDay(_ context.Context, doctorID, specialtyID int64, date time.Time) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	date = time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
+	updated := 0
+
+	for id, slot := range r.doctorSlots {
+		if slot.DoctorID != doctorID || slot.SpecialtyID != specialtyID {
+			continue
+		}
+		slotDay := time.Date(slot.StartAt.Year(), slot.StartAt.Month(), slot.StartAt.Day(), 0, 0, 0, 0, time.UTC)
+		if !slotDay.Equal(date) {
+			continue
+		}
+
+		isBooked := false
+		for _, b := range r.clinicBooking {
+			if b.DoctorSlotID == id && b.Status == "confirmed" {
+				isBooked = true
+				break
+			}
+		}
+		if isBooked {
+			continue
+		}
+
+		if !slot.IsAvailable {
+			updated++
+		}
+		slot.IsAvailable = true
+		r.doctorSlots[id] = slot
+	}
+
+	return updated, nil
+}
+
+func (r *MemoryRepository) ListDoctorSlotsForDay(_ context.Context, doctorID, specialtyID int64, date time.Time) ([]DoctorSlotDayView, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	date = time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
+
+	var out []DoctorSlotDayView
+	for _, slot := range r.doctorSlots {
+		if slot.DoctorID != doctorID || slot.SpecialtyID != specialtyID {
+			continue
+		}
+		slotDay := time.Date(slot.StartAt.Year(), slot.StartAt.Month(), slot.StartAt.Day(), 0, 0, 0, 0, time.UTC)
+		if !slotDay.Equal(date) {
+			continue
+		}
+
+		isBooked := false
+		for _, b := range r.clinicBooking {
+			if b.DoctorSlotID == slot.ID && b.Status == "confirmed" {
+				isBooked = true
+				break
+			}
+		}
+
+		out = append(out, DoctorSlotDayView{
+			ID:          slot.ID,
+			StartAt:     slot.StartAt,
+			IsAvailable: slot.IsAvailable,
+			IsBooked:    isBooked,
+		})
+	}
+
+	// Stable ordering by start time.
+	sort.Slice(out, func(i, j int) bool { return out[i].StartAt.Before(out[j].StartAt) })
+	return out, nil
 }
 
 func (r *MemoryRepository) LogAdminAction(_ context.Context, adminUserID int64, action, details string) error {
