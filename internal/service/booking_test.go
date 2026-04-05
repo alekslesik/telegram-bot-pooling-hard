@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/alekslesik/telegram-bot-pooling-middle/internal/repository"
+	"github.com/alekslesik/telegram-bot-pooling-hard/internal/repository"
 )
 
 func TestBookingService_HappyPath(t *testing.T) {

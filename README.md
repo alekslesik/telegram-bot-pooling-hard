@@ -1,4 +1,4 @@
-# telegram-bot-pooling-middle
+# telegram-bot-pooling-hard
 
 Level 2 Telegram bot template for service booking scenarios (hair salon, dentist, consultations).
 
@@ -119,7 +119,7 @@ The repository contains GitHub Actions workflows for:
 Recommended path for this project:
 
 ```bash
-/opt/bots/telegram-bot-pooling-middle
+/opt/bots/telegram-bot-pooling-hard
 ```
 
 Place `.env` in this folder on the server (token, username, `POSTGRES_*` names — **not** the DB password).  
@@ -132,7 +132,7 @@ The deploy job writes **`secrets/postgres_password`** on the VPS from **`VPS_POS
 - `VPS_HOST`
 - `VPS_USER`
 - `VPS_SSH_KEY`
-- `VPS_APP_PATH` (set to `/opt/bots/telegram-bot-pooling-middle`)
+- `VPS_APP_PATH` (set to `/opt/bots/telegram-bot-pooling-hard`)
 - `VPS_POSTGRES_PASSWORD` (database password; synced to `secrets/postgres_password` on the server each deploy)
 - `GHCR_READ_USER`
 - `GHCR_READ_TOKEN`

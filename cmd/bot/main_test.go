@@ -8,8 +8,8 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
-	"github.com/alekslesik/telegram-bot-pooling-middle/internal/bot"
-	"github.com/alekslesik/telegram-bot-pooling-middle/internal/logging"
+	"github.com/alekslesik/telegram-bot-pooling-hard/internal/bot"
+	"github.com/alekslesik/telegram-bot-pooling-hard/internal/logging"
 )
 
 func TestFormatBuildDate_RFC3339(t *testing.T) {

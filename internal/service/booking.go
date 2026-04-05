@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alekslesik/telegram-bot-pooling-middle/internal/repository"
+	"github.com/alekslesik/telegram-bot-pooling-hard/internal/repository"
 )
 
 const (

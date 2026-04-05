@@ -1,4 +1,4 @@
-APP_NAME := telegram-bot-pooling-middle
+APP_NAME := telegram-bot-pooling-hard
 BIN := bot
 GO_FILES := ./...
 DOCKER_IMAGE := $(APP_NAME)

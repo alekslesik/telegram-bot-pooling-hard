@@ -11,7 +11,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
-	"github.com/alekslesik/telegram-bot-pooling-middle/internal/service"
+	"github.com/alekslesik/telegram-bot-pooling-hard/internal/service"
 )
 
 const inlinePageSize = 4
