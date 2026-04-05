@@ -3,14 +3,18 @@ package bot
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 	"text/template"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"github.com/alekslesik/telegram-bot-pooling-hard/internal/i18n"
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/service"
 )
 
@@ -23,9 +27,10 @@ type TelegramClient interface {
 }
 
 type Handlers struct {
-	Bot     TelegramClient
-	Logger  *slog.Logger
-	Booking *service.BookingService
+	Bot         TelegramClient
+	Logger      *slog.Logger
+	Booking     *service.BookingService
+	BotUsername string
 }
 
 type Command struct {
@@ -46,6 +51,9 @@ var commandButtons = map[string]string{
 	"📅 Мои записи":         "mybookings",
 	"❌ Отмена записи":      "cancelbooking",
 	"📤 Загрузить документ": "uploaddoc",
+	"💼 Кабинет":            "cabinet",
+	"🇬🇧 EN":                "lang_en",
+	"🇷🇺 RU":                "lang_ru",
 	"🛠️ Админ":             "admin",
 	"🆘 Помощь":             "help",
 }
@@ -88,6 +96,11 @@ func commandKeyboard() tgbotapi.ReplyKeyboardMarkup {
 		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("📤 Загрузить документ"),
 			tgbotapi.NewKeyboardButton("🆘 Помощь"),
+		),
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("💼 Кабинет"),
+			tgbotapi.NewKeyboardButton("🇬🇧 EN"),
+			tgbotapi.NewKeyboardButton("🇷🇺 RU"),
 		),
 		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("🛠️ Админ"),
@@ -275,7 +288,67 @@ func (h Handlers) HandleCommand(msg *tgbotapi.Message) {
 	h.sendCommandReply(chatID, msg.Command(), msg)
 }
 
+func (h Handlers) bundleForUser(ctx context.Context, msg *tgbotapi.Message) i18n.Bundle {
+	uid := telegramUserID(msg)
+	stored := "ru"
+	if h.Booking != nil {
+		if s, err := h.Booking.PreferredLang(ctx, uid); err == nil {
+			stored = s
+		}
+	}
+	langCode := ""
+	if msg != nil && msg.From != nil {
+		langCode = msg.From.LanguageCode
+	}
+	return i18n.Bundle{Lang: i18n.Resolve(stored, langCode)}
+}
+
 func (h Handlers) sendCommandReply(chatID int64, cmdName string, msg *tgbotapi.Message) {
+	ctx := context.Background()
+	if h.Booking != nil && cmdName == "start" {
+		uid := telegramUserID(msg)
+		if err := h.Booking.EnsureUserStart(ctx, uid, msg.CommandArguments()); err != nil {
+			h.Logger.Error("ensure user start failed", "err", err)
+		}
+		uidp := uid
+		payload, _ := json.Marshal(map[string]string{"args": msg.CommandArguments()})
+		_ = h.Booking.LogAnalytics(ctx, &uidp, "cmd_start", string(payload))
+	}
+	if h.Booking != nil && cmdName == "cabinet" {
+		bal, code, err := h.Booking.AccountCabinet(ctx, telegramUserID(msg))
+		if err != nil {
+			h.Logger.Error("account cabinet failed", "err", err)
+			reply := tgbotapi.NewMessage(chatID, "Не удалось загрузить кабинет.")
+			reply.ReplyMarkup = commandKeyboard()
+			_, _ = h.Bot.Send(reply)
+			return
+		}
+		b := h.bundleForUser(ctx, msg)
+		botUser := strings.TrimSpace(os.Getenv("USERNAME"))
+		if h.BotUsername != "" {
+			botUser = strings.TrimPrefix(h.BotUsername, "@")
+		}
+		reply := tgbotapi.NewMessage(chatID, b.Cabinet(bal, code, botUser))
+		reply.ReplyMarkup = commandKeyboard()
+		_, _ = h.Bot.Send(reply)
+		return
+	}
+	if h.Booking != nil && (cmdName == "lang_en" || cmdName == "lang_ru") {
+		lang := "en"
+		newLang := i18n.En
+		if cmdName == "lang_ru" {
+			lang = "ru"
+			newLang = i18n.Ru
+		}
+		if err := h.Booking.SetPreferredLang(ctx, telegramUserID(msg), lang); err != nil {
+			h.Logger.Error("set preferred lang failed", "err", err)
+		}
+		b := i18n.Bundle{Lang: newLang}
+		reply := tgbotapi.NewMessage(chatID, b.LanguageSet(strings.ToUpper(lang)))
+		reply.ReplyMarkup = commandKeyboard()
+		_, _ = h.Bot.Send(reply)
+		return
+	}
 	if h.Booking != nil && cmdName == "uploaddoc" {
 		text, err := h.Booking.StartDocumentUpload(context.Background(), telegramUserID(msg))
 		if err != nil {
@@ -597,10 +670,29 @@ func (h Handlers) handleBookingCallback(q *tgbotapi.CallbackQuery) {
 		if q.From != nil {
 			userID = q.From.ID
 		}
-		text, err := h.Booking.ConfirmClinicBooking(context.Background(), userID, specID, docID, slotID)
+		lang := i18n.Ru
+		if q.From != nil {
+			stored := "ru"
+			if s, err := h.Booking.PreferredLang(context.Background(), userID); err == nil {
+				stored = s
+			}
+			lang = i18n.Resolve(stored, q.From.LanguageCode)
+		}
+		text, err := h.Booking.ConfirmClinicBooking(context.Background(), userID, specID, docID, slotID, lang)
+		var insufficient *service.InsufficientFundsError
+		if errors.As(err, &insufficient) {
+			b := i18n.Bundle{Lang: lang}
+			text = b.InsufficientBalance(insufficient.FeeCents, insufficient.BalanceCents)
+			err = nil
+		}
 		if err != nil {
 			h.Logger.Error("confirm clinic booking failed", "err", err)
 			text = "Не удалось подтвердить запись. Попробуйте позже."
+		}
+		if err == nil && strings.Contains(text, "\nID:") {
+			uidp := userID
+			payload, _ := json.Marshal(map[string]int64{"spec_id": specID, "doc_id": docID, "slot_id": slotID})
+			_ = h.Booking.LogAnalytics(context.Background(), &uidp, "booking_confirmed", string(payload))
 		}
 		reply := tgbotapi.NewMessage(chatID, text)
 		reply.ReplyMarkup = commandKeyboard()
@@ -795,6 +887,19 @@ func (h Handlers) handleAdminCallback(q *tgbotapi.CallbackQuery) {
 		text, err = h.Booking.StartAdminOpenDay(context.Background(), userID)
 	case "dayslots":
 		text, err = h.Booking.StartAdminDaySlots(context.Background(), userID)
+	case "analytics":
+		report, errAn := h.Booking.AdminAnalyticsReport(context.Background(), userID)
+		err = nil
+		if errAn != nil {
+			text = "Нет доступа к аналитике."
+		} else {
+			b := h.bundleForUser(context.Background(), &tgbotapi.Message{From: q.From})
+			if strings.TrimSpace(report) == "" {
+				text = b.NoAnalytics()
+			} else {
+				text = b.AnalyticsAdmin(strings.Split(strings.TrimSpace(report), "\n"))
+			}
+		}
 	case "close":
 		text = "Админ-панель закрыта."
 	default:
@@ -838,6 +943,9 @@ func (h Handlers) adminKeyboard() *tgbotapi.InlineKeyboardMarkup {
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("Слоты на день", "admin:dayslots"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("📊 Аналитика (7 дн.)", "admin:analytics"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("✖️ Закрыть", "admin:close"),

@@ -1,6 +1,6 @@
 # telegram-bot-pooling-hard
 
-Level 2 Telegram bot template for service booking scenarios (hair salon, dentist, consultations).
+Level 2–3 Telegram bot template: service booking (клиника / салон) плюс задел под «продвинутый» бот (баланс, рефералы, i18n, Redis, аналитика). Целевой профиль Level 3 описан в [RFC.md](RFC.md).
 
 This repository is designed as a more advanced and sellable version of the first bot level, while keeping a similar project structure for easier maintenance and future feature development.
 
@@ -32,8 +32,9 @@ Build a medium-complexity Telegram bot for service appointments.
 
 ## Current Repository Status
 
-The project already includes a base Go bot scaffold, tests, Docker packaging, and CI/CD workflows.  
-The repository now includes an MVP booking wizard with persistent conversation state.
+The project includes a Go bot scaffold, tests, Docker packaging, and CI (`.github/workflows/ci.yml`).  
+**Booking:** MVP wizard с записью к врачу, отменой, документами, админ-инструментами по слотам.  
+**Level 3 (RFC):** профиль пользователя (`user_profiles`), списание баланса за запись, реферальные бонусы, RU/EN, события аналитики, опциональный Redis для кеша списка специализаций. Миграция `006_level3_profiles_analytics.sql`.
 
 ### Implemented MVP Wizard Flow
 
@@ -68,6 +69,7 @@ Main variables:
 - `POSTGRES_DB`, `POSTGRES_USER` - database name and user for Compose (see [.env.example](.env.example)).
 - **Postgres password (Compose)** - put a single line in `secrets/postgres_password` (not in git). On deploy, GitHub Actions writes this file from the `VPS_POSTGRES_PASSWORD` secret.
 - `DB_DSN` - optional full DSN for local/non-Compose runs. If unset, the bot builds a DSN from `DB_PASSWORD_FILE` (set automatically in Compose) plus `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`. If neither `DB_DSN` nor `DB_PASSWORD_FILE` is available, the bot uses in-memory storage.
+- `REDIS_ADDR` - optional, e.g. `localhost:6379` or `redis:6379` in Compose; enables caching of specialty list pages.
 - `APP_ENV`, `LOG_LEVEL`, `LOG_FORMAT` - runtime options.
 
 ### Database migration
@@ -108,11 +110,7 @@ make docker-compose-down
 
 ## CI/CD and Deployment
 
-The repository contains GitHub Actions workflows for:
-
-- `ci.yml` - build, lint, test, vulnerability checks, docker build.
-- `release.yml` - build and push image to GHCR, then deploy to VPS.
-- `deploy.yml` - manual/deprecated SSH deploy helper.
+The repository includes `ci.yml` (tests, `go vet`, Docker build). Release/deploy workflows can be added separately for your VPS pipeline.
 
 ### VPS layout (multi-bot safe)
 

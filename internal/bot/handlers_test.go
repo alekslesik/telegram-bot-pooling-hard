@@ -345,7 +345,7 @@ func TestHandlers_BookingFlow(t *testing.T) {
 	fb := &fakeBot{}
 	repo := repository.NewMemoryRepository()
 	h := newTestHandlers(fb)
-	h.Booking = service.NewBookingService(repo)
+	h.Booking = service.NewBookingService(repo, nil)
 
 	h.HandleCommand(commandMessage(1, "/book", 5))
 	cfg, ok := fb.last.(tgbotapi.MessageConfig)

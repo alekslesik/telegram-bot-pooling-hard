@@ -3,12 +3,14 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/alekslesik/telegram-bot-pooling-hard/internal/i18n"
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/repository"
 )
 
@@ -38,11 +40,12 @@ type statePayload struct {
 var phoneCleaner = regexp.MustCompile(`[^0-9+]`)
 
 type BookingService struct {
-	repo repository.BookingRepository
+	repo  repository.BookingRepository
+	cache SpecialtyPageCache
 }
 
-func NewBookingService(repo repository.BookingRepository) *BookingService {
-	return &BookingService{repo: repo}
+func NewBookingService(repo repository.BookingRepository, cache SpecialtyPageCache) *BookingService {
+	return &BookingService{repo: repo, cache: cache}
 }
 
 func (s *BookingService) Start(ctx context.Context, userID int64) (string, error) {
@@ -477,6 +480,10 @@ func (s *BookingService) handlePhoneInput(ctx context.Context, userID int64, pay
 	}); err != nil {
 		return true, "", err
 	}
+	if _, err := s.repo.EnsureUserProfile(ctx, userID); err != nil {
+		return true, "", err
+	}
+	_ = s.repo.GrantReferralRewardsOnRegistration(ctx, userID, RefereeSignupBonusCents, ReferrerSignupBonusCents)
 	if err := s.repo.DeleteConversationState(ctx, userID); err != nil {
 		return true, "", err
 	}
@@ -645,6 +652,20 @@ func (s *BookingService) IsRegistered(ctx context.Context, userID int64) (bool, 
 }
 
 func (s *BookingService) ListSpecialtiesPage(ctx context.Context, page, pageSize int) ([]repository.Specialty, int, error) {
+	cacheKey := fmt.Sprintf("specpage:%d:%d", page, pageSize)
+	if s.cache != nil {
+		raw, err := s.cache.Get(ctx, cacheKey)
+		if err == nil && raw != "" {
+			var payload struct {
+				Items []repository.Specialty `json:"items"`
+				Total int                    `json:"total"`
+			}
+			if jsonErr := json.Unmarshal([]byte(raw), &payload); jsonErr == nil {
+				return payload.Items, payload.Total, nil
+			}
+		}
+	}
+
 	offset := page * pageSize
 	items, err := s.repo.ListSpecialties(ctx, pageSize, offset)
 	if err != nil {
@@ -654,6 +675,15 @@ func (s *BookingService) ListSpecialtiesPage(ctx context.Context, page, pageSize
 	if err != nil {
 		return nil, 0, err
 	}
+
+	if s.cache != nil {
+		payload, _ := json.Marshal(struct {
+			Items []repository.Specialty `json:"items"`
+			Total int                    `json:"total"`
+		}{Items: items, Total: total})
+		_ = s.cache.Set(ctx, cacheKey, string(payload), specialtyCacheTTL)
+	}
+
 	return items, total, nil
 }
 
@@ -683,7 +713,11 @@ func (s *BookingService) ListSlotsPage(ctx context.Context, specialtyID, doctorI
 	return items, total, nil
 }
 
-func (s *BookingService) ConfirmClinicBooking(ctx context.Context, userID, specialtyID, doctorID, slotID int64) (string, error) {
+func (s *BookingService) ConfirmClinicBooking(ctx context.Context, userID, specialtyID, doctorID, slotID int64, lang i18n.Lang) (string, error) {
+	if _, err := s.repo.EnsureUserProfile(ctx, userID); err != nil {
+		return "", err
+	}
+
 	slot, err := s.repo.GetDoctorSlotByID(ctx, slotID)
 	if err != nil {
 		return "", err
@@ -691,37 +725,30 @@ func (s *BookingService) ConfirmClinicBooking(ctx context.Context, userID, speci
 	if !slot.IsAvailable || slot.DoctorID != doctorID || slot.SpecialtyID != specialtyID {
 		return "Этот слот уже недоступен. Выберите другое время.", nil
 	}
-	if err := s.repo.MarkDoctorSlotUnavailable(ctx, slotID); err != nil {
-		if err == repository.ErrNotFound {
+
+	res, err := s.repo.ConfirmPaidClinicBooking(ctx, userID, ClinicBookingFeeCents, specialtyID, doctorID, slotID)
+	if err != nil {
+		if errors.Is(err, repository.ErrInsufficientFunds) {
+			p, perr := s.repo.GetUserProfile(ctx, userID)
+			if perr != nil {
+				return "", perr
+			}
+			return "", &InsufficientFundsError{FeeCents: ClinicBookingFeeCents, BalanceCents: p.BalanceCents}
+		}
+		if errors.Is(err, repository.ErrNotFound) {
 			return "Этот слот уже занят. Выберите другое время.", nil
 		}
 		return "", err
 	}
-	booking, err := s.repo.CreateClinicBooking(ctx, repository.ClinicBooking{
-		TelegramUserID: userID,
-		SpecialtyID:    specialtyID,
-		DoctorID:       doctorID,
-		DoctorSlotID:   slotID,
-		Status:         "confirmed",
-		CreatedAt:      time.Now().UTC(),
-	})
-	if err != nil {
-		return "", err
-	}
-	doctor, err := s.repo.GetDoctorByID(ctx, doctorID)
-	if err != nil {
-		return "", err
-	}
-	specialty, err := s.repo.GetSpecialtyByID(ctx, specialtyID)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf(
-		"Запись подтверждена.\nID: %d\nНаправление: %s\nВрач: %s\nВремя: %s",
-		booking.ID,
-		specialty.Name,
-		doctor.FullName,
-		slot.StartAt.Format("02.01.2006 15:04"),
+
+	b := i18n.Bundle{Lang: lang}
+	return b.BookingConfirmed(
+		res.BookingID,
+		res.SpecialtyName,
+		res.DoctorName,
+		res.SlotStart.Format("02.01.2006 15:04"),
+		ClinicBookingFeeCents,
+		res.BalanceAfter,
 	), nil
 }
 

@@ -5,12 +5,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/alekslesik/telegram-bot-pooling-hard/internal/i18n"
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/repository"
 )
 
 func TestBookingService_HappyPath(t *testing.T) {
 	repo := repository.NewMemoryRepository()
-	svc := NewBookingService(repo)
+	svc := NewBookingService(repo, nil)
 	ctx := context.Background()
 	const userID int64 = 42
 
@@ -56,7 +57,7 @@ func TestBookingService_HappyPath(t *testing.T) {
 	if err != nil || totalSlots == 0 || len(slots) == 0 {
 		t.Fatalf("slots list error: total=%d len=%d err=%v", totalSlots, len(slots), err)
 	}
-	final, err := svc.ConfirmClinicBooking(ctx, userID, specialties[0].ID, doctors[0].ID, slots[0].ID)
+	final, err := svc.ConfirmClinicBooking(ctx, userID, specialties[0].ID, doctors[0].ID, slots[0].ID, i18n.Ru)
 	if err != nil {
 		t.Fatalf("confirm clinic booking error: %v", err)
 	}
@@ -70,7 +71,7 @@ func TestBookingService_StatePersistenceAcrossServiceInstances(t *testing.T) {
 	ctx := context.Background()
 	const userID int64 = 11
 
-	svc1 := NewBookingService(repo)
+	svc1 := NewBookingService(repo, nil)
 	if _, err := svc1.Start(ctx, userID); err != nil {
 		t.Fatalf("start error: %v", err)
 	}
@@ -80,7 +81,7 @@ func TestBookingService_StatePersistenceAcrossServiceInstances(t *testing.T) {
 	if _, _, err := svc1.HandleText(ctx, userID, "+79991234567"); err != nil {
 		t.Fatalf("phone step error: %v", err)
 	}
-	svc2 := NewBookingService(repo)
+	svc2 := NewBookingService(repo, nil)
 	handled, msg, err := svc2.HandleText(ctx, userID, "1")
 	if err != nil {
 		t.Fatalf("slot selection error after restart: %v", err)
@@ -92,7 +93,7 @@ func TestBookingService_StatePersistenceAcrossServiceInstances(t *testing.T) {
 
 func TestBookingService_Cancel(t *testing.T) {
 	repo := repository.NewMemoryRepository()
-	svc := NewBookingService(repo)
+	svc := NewBookingService(repo, nil)
 	ctx := context.Background()
 	const userID int64 = 7
 
@@ -110,7 +111,7 @@ func TestBookingService_Cancel(t *testing.T) {
 
 func TestBookingService_RegisteredClientSkipsRegistration(t *testing.T) {
 	repo := repository.NewMemoryRepository()
-	svc := NewBookingService(repo)
+	svc := NewBookingService(repo, nil)
 	ctx := context.Background()
 	const userID int64 = 123
 

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 type PostgresRepository struct {
@@ -673,4 +675,265 @@ func (r *PostgresRepository) SaveConversationState(ctx context.Context, state Co
 func (r *PostgresRepository) DeleteConversationState(ctx context.Context, userID int64) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM conversation_states WHERE telegram_user_id = $1`, userID)
 	return err
+}
+
+func (r *PostgresRepository) EnsureUserProfile(ctx context.Context, userID int64) (UserProfile, error) {
+	if p, err := r.GetUserProfile(ctx, userID); err == nil {
+		return p, nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return UserProfile{}, err
+	}
+
+	for i := 0; i < 12; i++ {
+		code, err := randomReferralCode()
+		if err != nil {
+			return UserProfile{}, err
+		}
+		_, err = r.db.ExecContext(ctx, `
+			INSERT INTO user_profiles (telegram_user_id, referral_code)
+			VALUES ($1, $2)`, userID, code)
+		if err == nil {
+			return r.GetUserProfile(ctx, userID)
+		}
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+			continue
+		}
+		return UserProfile{}, err
+	}
+	return UserProfile{}, fmt.Errorf("could not allocate unique referral code")
+}
+
+func (r *PostgresRepository) GetUserProfile(ctx context.Context, userID int64) (UserProfile, error) {
+	var p UserProfile
+	var referred sql.NullInt64
+	err := r.db.QueryRowContext(ctx, `
+		SELECT telegram_user_id, balance_cents, referral_code, referred_by_telegram_id,
+		       preferred_lang, referral_reward_granted, created_at, updated_at
+		FROM user_profiles
+		WHERE telegram_user_id = $1`, userID).
+		Scan(&p.TelegramUserID, &p.BalanceCents, &p.ReferralCode, &referred,
+			&p.PreferredLang, &p.ReferralRewardGranted, &p.CreatedAt, &p.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return UserProfile{}, ErrNotFound
+	}
+	if err != nil {
+		return UserProfile{}, err
+	}
+	if referred.Valid {
+		v := referred.Int64
+		p.ReferredByTelegramID = &v
+	}
+	return p, nil
+}
+
+func (r *PostgresRepository) SetPreferredLang(ctx context.Context, userID int64, lang string) error {
+	lang = strings.TrimSpace(strings.ToLower(lang))
+	if lang != "en" && lang != "ru" {
+		lang = "ru"
+	}
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE user_profiles SET preferred_lang = $2, updated_at = NOW()
+		WHERE telegram_user_id = $1`, userID, lang)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *PostgresRepository) ApplyReferralCodeIfNew(ctx context.Context, userID int64, code string) error {
+	code = strings.TrimSpace(strings.ToLower(code))
+	if code == "" {
+		return nil
+	}
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE user_profiles u
+		SET referred_by_telegram_id = r.telegram_user_id, updated_at = NOW()
+		FROM user_profiles r
+		WHERE u.telegram_user_id = $1
+		  AND u.referred_by_telegram_id IS NULL
+		  AND r.referral_code = $2
+		  AND r.telegram_user_id <> $1`, userID, code)
+	if err != nil {
+		return err
+	}
+	_, _ = res.RowsAffected()
+	return nil
+}
+
+func (r *PostgresRepository) GrantReferralRewardsOnRegistration(ctx context.Context, userID, refereeBonusCents, referrerBonusCents int64) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var referred sql.NullInt64
+	var granted bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT referred_by_telegram_id, referral_reward_granted
+		FROM user_profiles
+		WHERE telegram_user_id = $1
+		FOR UPDATE`, userID).Scan(&referred, &granted)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = nil
+		return tx.Commit()
+	}
+	if err != nil {
+		return err
+	}
+	if granted || !referred.Valid {
+		return tx.Commit()
+	}
+	refID := referred.Int64
+
+	if _, err = tx.ExecContext(ctx, `
+		UPDATE user_profiles
+		SET balance_cents = balance_cents + $2,
+		    referral_reward_granted = TRUE,
+		    updated_at = NOW()
+		WHERE telegram_user_id = $1`, userID, refereeBonusCents); err != nil {
+		return err
+	}
+
+	if _, err = tx.ExecContext(ctx, `
+		UPDATE user_profiles
+		SET balance_cents = balance_cents + $2,
+		    updated_at = NOW()
+		WHERE telegram_user_id = $1`, refID, referrerBonusCents); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func (r *PostgresRepository) LogAnalyticsEvent(ctx context.Context, userID *int64, eventType, payloadJSON string) error {
+	if strings.TrimSpace(payloadJSON) == "" {
+		payloadJSON = "{}"
+	}
+	var uid any
+	if userID != nil {
+		uid = *userID
+	}
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO analytics_events (telegram_user_id, event_type, payload_json)
+		VALUES ($1, $2, $3::jsonb)`, uid, eventType, payloadJSON)
+	return err
+}
+
+func (r *PostgresRepository) CountAnalyticsByEventSince(ctx context.Context, since time.Time) (map[string]int64, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT event_type, COUNT(*)
+		FROM analytics_events
+		WHERE created_at >= $1
+		GROUP BY event_type`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]int64)
+	for rows.Next() {
+		var typ string
+		var n int64
+		if err := rows.Scan(&typ, &n); err != nil {
+			return nil, err
+		}
+		out[typ] = n
+	}
+	return out, rows.Err()
+}
+
+func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userID, feeCents, specialtyID, doctorID, slotID int64) (PaidBookingResult, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return PaidBookingResult{}, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var balance int64
+	err = tx.QueryRowContext(ctx, `
+		SELECT balance_cents FROM user_profiles WHERE telegram_user_id = $1 FOR UPDATE`, userID).Scan(&balance)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = ErrNotFound
+		return PaidBookingResult{}, err
+	}
+	if err != nil {
+		return PaidBookingResult{}, err
+	}
+	if balance < feeCents {
+		err = ErrInsufficientFunds
+		return PaidBookingResult{}, err
+	}
+
+	var newBal int64
+	err = tx.QueryRowContext(ctx, `
+		UPDATE user_profiles
+		SET balance_cents = balance_cents - $2, updated_at = NOW()
+		WHERE telegram_user_id = $1
+		RETURNING balance_cents`, userID, feeCents).Scan(&newBal)
+	if err != nil {
+		return PaidBookingResult{}, err
+	}
+
+	var slotStart time.Time
+	err = tx.QueryRowContext(ctx, `
+		UPDATE doctor_slots
+		SET is_available = FALSE
+		WHERE id = $1 AND doctor_id = $2 AND specialty_id = $3 AND is_available = TRUE
+		RETURNING start_at`, slotID, doctorID, specialtyID).Scan(&slotStart)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = ErrNotFound
+		return PaidBookingResult{}, err
+	}
+	if err != nil {
+		return PaidBookingResult{}, err
+	}
+
+	var bookingID int64
+	var createdAt time.Time
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO clinic_bookings (telegram_user_id, specialty_id, doctor_id, doctor_slot_id, status)
+		VALUES ($1, $2, $3, $4, 'confirmed')
+		RETURNING id, created_at`,
+		userID, specialtyID, doctorID, slotID).Scan(&bookingID, &createdAt)
+	if err != nil {
+		return PaidBookingResult{}, err
+	}
+
+	var specName, docName string
+	err = tx.QueryRowContext(ctx, `
+		SELECT s.name, d.full_name
+		FROM specialties s, doctors d
+		WHERE s.id = $1 AND d.id = $2`, specialtyID, doctorID).Scan(&specName, &docName)
+	if err != nil {
+		return PaidBookingResult{}, err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return PaidBookingResult{}, err
+	}
+
+	return PaidBookingResult{
+		BookingID:      bookingID,
+		SpecialtyName:  specName,
+		DoctorName:     docName,
+		SlotStart:      slotStart,
+		BalanceAfter:   newBal,
+		BookingCreated: createdAt,
+	}, nil
 }

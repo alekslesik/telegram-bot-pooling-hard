@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"sort"
 	"strings"
@@ -9,7 +11,10 @@ import (
 	"time"
 )
 
-var ErrNotFound = errors.New("not found")
+var (
+	ErrNotFound          = errors.New("not found")
+	ErrInsufficientFunds = errors.New("insufficient funds")
+)
 
 type Service struct {
 	ID          int64
@@ -118,6 +123,28 @@ type AdminAuditLog struct {
 	CreatedAt   time.Time
 }
 
+// UserProfile holds Level-3 account fields (balance, referrals, locale).
+type UserProfile struct {
+	TelegramUserID        int64
+	BalanceCents          int64
+	ReferralCode          string
+	ReferredByTelegramID  *int64
+	PreferredLang         string
+	ReferralRewardGranted bool
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
+}
+
+// PaidBookingResult is returned after an atomic paid clinic booking commit.
+type PaidBookingResult struct {
+	BookingID      int64
+	SpecialtyName  string
+	DoctorName     string
+	SlotStart      time.Time
+	BalanceAfter   int64
+	BookingCreated time.Time
+}
+
 type BookingRepository interface {
 	ListActiveServices(ctx context.Context) ([]Service, error)
 	GetServiceByID(ctx context.Context, serviceID int64) (Service, error)
@@ -161,6 +188,16 @@ type BookingRepository interface {
 	GetConversationState(ctx context.Context, userID int64) (ConversationState, error)
 	SaveConversationState(ctx context.Context, state ConversationState) error
 	DeleteConversationState(ctx context.Context, userID int64) error
+
+	// Level 3: profiles, analytics, paid booking.
+	EnsureUserProfile(ctx context.Context, userID int64) (UserProfile, error)
+	GetUserProfile(ctx context.Context, userID int64) (UserProfile, error)
+	SetPreferredLang(ctx context.Context, userID int64, lang string) error
+	ApplyReferralCodeIfNew(ctx context.Context, userID int64, code string) error
+	GrantReferralRewardsOnRegistration(ctx context.Context, userID, refereeBonusCents, referrerBonusCents int64) error
+	LogAnalyticsEvent(ctx context.Context, userID *int64, eventType, payloadJSON string) error
+	CountAnalyticsByEventSince(ctx context.Context, since time.Time) (map[string]int64, error)
+	ConfirmPaidClinicBooking(ctx context.Context, userID, feeCents, specialtyID, doctorID, slotID int64) (PaidBookingResult, error)
 }
 
 type MemoryRepository struct {
@@ -185,32 +222,55 @@ type MemoryRepository struct {
 	admins       map[int64]struct{}
 	adminLogs    []AdminAuditLog
 	nextAdminLog int64
+
+	userProfiles    map[int64]UserProfile
+	analyticsEvents []memoryAnalyticsEvent
+	nextAnalyticID  int64
+}
+
+type memoryAnalyticsEvent struct {
+	ID        int64
+	UserID    *int64
+	EventType string
+	Payload   string
+	CreatedAt time.Time
 }
 
 func NewMemoryRepository() *MemoryRepository {
 	r := &MemoryRepository{
-		services:      make(map[int64]Service),
-		slots:         make(map[int64]Slot),
-		bookings:      make(map[int64]Booking),
-		states:        make(map[int64]ConversationState),
-		clients:       make(map[int64]Client),
-		specialties:   make(map[int64]Specialty),
-		doctors:       make(map[int64]Doctor),
-		doctorLinks:   make(map[int64]map[int64]struct{}),
-		doctorSlots:   make(map[int64]DoctorSlot),
-		clinicBooking: make(map[int64]ClinicBooking),
-		documents:     make(map[int64]UserDocument),
-		nextBookingID: 1,
-		nextServiceID: 1,
-		nextSlotID:    1,
-		nextClinicID:  1,
-		nextDocID:     1,
-		admins:        make(map[int64]struct{}),
-		adminLogs:     []AdminAuditLog{},
-		nextAdminLog:  1,
+		services:        make(map[int64]Service),
+		slots:           make(map[int64]Slot),
+		bookings:        make(map[int64]Booking),
+		states:          make(map[int64]ConversationState),
+		clients:         make(map[int64]Client),
+		specialties:     make(map[int64]Specialty),
+		doctors:         make(map[int64]Doctor),
+		doctorLinks:     make(map[int64]map[int64]struct{}),
+		doctorSlots:     make(map[int64]DoctorSlot),
+		clinicBooking:   make(map[int64]ClinicBooking),
+		documents:       make(map[int64]UserDocument),
+		nextBookingID:   1,
+		nextServiceID:   1,
+		nextSlotID:      1,
+		nextClinicID:    1,
+		nextDocID:       1,
+		admins:          make(map[int64]struct{}),
+		adminLogs:       []AdminAuditLog{},
+		nextAdminLog:    1,
+		userProfiles:    make(map[int64]UserProfile),
+		analyticsEvents: []memoryAnalyticsEvent{},
+		nextAnalyticID:  1,
 	}
 	r.seed()
 	return r
+}
+
+func randomReferralCode() (string, error) {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return strings.ToLower(hex.EncodeToString(b[:])), nil
 }
 
 func (r *MemoryRepository) seed() {
@@ -894,4 +954,231 @@ func pageBounds(length, limit, offset int) (int, int) {
 		end = length
 	}
 	return offset, end
+}
+
+func (r *MemoryRepository) referralCodeTakenLocked(code string) bool {
+	for _, p := range r.userProfiles {
+		if p.ReferralCode == code {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *MemoryRepository) EnsureUserProfile(_ context.Context, userID int64) (UserProfile, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p, ok := r.userProfiles[userID]; ok {
+		return p, nil
+	}
+	for {
+		code, err := randomReferralCode()
+		if err != nil {
+			return UserProfile{}, err
+		}
+		if r.referralCodeTakenLocked(code) {
+			continue
+		}
+		now := time.Now().UTC()
+		p := UserProfile{
+			TelegramUserID:        userID,
+			BalanceCents:          500,
+			ReferralCode:          code,
+			PreferredLang:         "ru",
+			ReferralRewardGranted: false,
+			CreatedAt:             now,
+			UpdatedAt:             now,
+		}
+		r.userProfiles[userID] = p
+		return p, nil
+	}
+}
+
+func (r *MemoryRepository) GetUserProfile(_ context.Context, userID int64) (UserProfile, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p, ok := r.userProfiles[userID]
+	if !ok {
+		return UserProfile{}, ErrNotFound
+	}
+	return p, nil
+}
+
+func (r *MemoryRepository) SetPreferredLang(_ context.Context, userID int64, lang string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p, ok := r.userProfiles[userID]
+	if !ok {
+		return ErrNotFound
+	}
+	lang = strings.TrimSpace(strings.ToLower(lang))
+	if lang != "en" && lang != "ru" {
+		lang = "ru"
+	}
+	p.PreferredLang = lang
+	p.UpdatedAt = time.Now().UTC()
+	r.userProfiles[userID] = p
+	return nil
+}
+
+func (r *MemoryRepository) ApplyReferralCodeIfNew(_ context.Context, userID int64, code string) error {
+	code = strings.TrimSpace(strings.ToLower(code))
+	if code == "" {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p, ok := r.userProfiles[userID]
+	if !ok {
+		return ErrNotFound
+	}
+	if p.ReferredByTelegramID != nil {
+		return nil
+	}
+	var refID int64
+	found := false
+	for id, prof := range r.userProfiles {
+		if prof.ReferralCode == code && id != userID {
+			refID = id
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil
+	}
+	p.ReferredByTelegramID = int64Ptr(refID)
+	p.UpdatedAt = time.Now().UTC()
+	r.userProfiles[userID] = p
+	return nil
+}
+
+func int64Ptr(v int64) *int64 {
+	return &v
+}
+
+func (r *MemoryRepository) GrantReferralRewardsOnRegistration(_ context.Context, userID, refereeBonusCents, referrerBonusCents int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p, ok := r.userProfiles[userID]
+	if !ok {
+		return ErrNotFound
+	}
+	if p.ReferralRewardGranted || p.ReferredByTelegramID == nil {
+		return nil
+	}
+	refID := *p.ReferredByTelegramID
+	ref, ok := r.userProfiles[refID]
+	if !ok {
+		return nil
+	}
+	p.BalanceCents += refereeBonusCents
+	p.ReferralRewardGranted = true
+	p.UpdatedAt = time.Now().UTC()
+	r.userProfiles[userID] = p
+
+	ref.BalanceCents += referrerBonusCents
+	ref.UpdatedAt = time.Now().UTC()
+	r.userProfiles[refID] = ref
+	return nil
+}
+
+func (r *MemoryRepository) LogAnalyticsEvent(_ context.Context, userID *int64, eventType, payloadJSON string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if strings.TrimSpace(payloadJSON) == "" {
+		payloadJSON = "{}"
+	}
+	r.analyticsEvents = append(r.analyticsEvents, memoryAnalyticsEvent{
+		ID:        r.nextAnalyticID,
+		UserID:    userID,
+		EventType: eventType,
+		Payload:   payloadJSON,
+		CreatedAt: time.Now().UTC(),
+	})
+	r.nextAnalyticID++
+	return nil
+}
+
+func (r *MemoryRepository) CountAnalyticsByEventSince(_ context.Context, since time.Time) (map[string]int64, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]int64)
+	for _, e := range r.analyticsEvents {
+		if e.CreatedAt.Before(since) {
+			continue
+		}
+		out[e.EventType]++
+	}
+	return out, nil
+}
+
+func (r *MemoryRepository) ConfirmPaidClinicBooking(_ context.Context, userID, feeCents, specialtyID, doctorID, slotID int64) (PaidBookingResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	p, ok := r.userProfiles[userID]
+	if !ok {
+		for {
+			code, err := randomReferralCode()
+			if err != nil {
+				return PaidBookingResult{}, err
+			}
+			if r.referralCodeTakenLocked(code) {
+				continue
+			}
+			now := time.Now().UTC()
+			p = UserProfile{
+				TelegramUserID:        userID,
+				BalanceCents:          500,
+				ReferralCode:          code,
+				PreferredLang:         "ru",
+				ReferralRewardGranted: false,
+				CreatedAt:             now,
+				UpdatedAt:             now,
+			}
+			r.userProfiles[userID] = p
+			break
+		}
+	}
+
+	if p.BalanceCents < feeCents {
+		return PaidBookingResult{}, ErrInsufficientFunds
+	}
+
+	slot, ok := r.doctorSlots[slotID]
+	if !ok || !slot.IsAvailable || slot.DoctorID != doctorID || slot.SpecialtyID != specialtyID {
+		return PaidBookingResult{}, ErrNotFound
+	}
+
+	p.BalanceCents -= feeCents
+	p.UpdatedAt = time.Now().UTC()
+	r.userProfiles[userID] = p
+
+	slot.IsAvailable = false
+	r.doctorSlots[slotID] = slot
+
+	booking := ClinicBooking{
+		ID:             r.nextClinicID,
+		TelegramUserID: userID,
+		SpecialtyID:    specialtyID,
+		DoctorID:       doctorID,
+		DoctorSlotID:   slotID,
+		Status:         "confirmed",
+		CreatedAt:      time.Now().UTC(),
+	}
+	r.nextClinicID++
+	r.clinicBooking[booking.ID] = booking
+
+	spec := r.specialties[specialtyID]
+	doc := r.doctors[doctorID]
+
+	return PaidBookingResult{
+		BookingID:      booking.ID,
+		SpecialtyName:  spec.Name,
+		DoctorName:     doc.FullName,
+		SlotStart:      slot.StartAt,
+		BalanceAfter:   p.BalanceCents,
+		BookingCreated: booking.CreatedAt,
+	}, nil
 }

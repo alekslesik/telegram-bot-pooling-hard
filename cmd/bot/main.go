@@ -12,6 +12,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/bot"
+	"github.com/alekslesik/telegram-bot-pooling-hard/internal/cache"
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/dbconfig"
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/logging"
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/repository"
@@ -134,12 +135,24 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to init booking repository: %v", err)
 	}
-	bookingService := service.NewBookingService(bookingRepo)
+
+	redisCache, err := cache.NewRedisFromEnv()
+	if err != nil {
+		log.Fatalf("redis: %v", err)
+	}
+	if redisCache != nil {
+		defer func() { _ = redisCache.Close() }()
+		logger.Info("redis cache enabled for specialty pages")
+	}
+
+	var specCache service.SpecialtyPageCache = redisCache
+	bookingService := service.NewBookingService(bookingRepo, specCache)
 
 	h := bot.Handlers{
-		Bot:     tg,
-		Logger:  logger,
-		Booking: bookingService,
+		Bot:         tg,
+		Logger:      logger,
+		Booking:     bookingService,
+		BotUsername: tg.Self.UserName,
 	}
 
 	logger.Info("bot started with long polling, press Ctrl+C to stop")
