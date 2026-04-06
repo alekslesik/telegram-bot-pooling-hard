@@ -163,6 +163,7 @@ type BookingRepository interface {
 	GetDoctorSlotByID(ctx context.Context, slotID int64) (DoctorSlot, error)
 	CreateBooking(ctx context.Context, booking Booking) (Booking, error)
 	MarkSlotUnavailable(ctx context.Context, slotID int64) error
+	ConfirmServiceBooking(ctx context.Context, booking Booking) (Booking, error)
 	CreateClinicBooking(ctx context.Context, booking ClinicBooking) (ClinicBooking, error)
 	MarkDoctorSlotUnavailable(ctx context.Context, slotID int64) error
 	ListUserClinicBookings(ctx context.Context, userID int64, limit, offset int) ([]ClinicBookingView, error)
@@ -390,6 +391,26 @@ func (r *MemoryRepository) MarkSlotUnavailable(_ context.Context, slotID int64) 
 	slot.IsAvailable = false
 	r.slots[slotID] = slot
 	return nil
+}
+
+func (r *MemoryRepository) ConfirmServiceBooking(_ context.Context, booking Booking) (Booking, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	slot, ok := r.slots[booking.SlotID]
+	if !ok || !slot.IsAvailable {
+		return Booking{}, ErrNotFound
+	}
+	slot.IsAvailable = false
+	r.slots[booking.SlotID] = slot
+
+	booking.ID = r.nextBookingID
+	r.nextBookingID++
+	if booking.CreatedAt.IsZero() {
+		booking.CreatedAt = time.Now().UTC()
+	}
+	r.bookings[booking.ID] = booking
+	return booking, nil
 }
 
 func (r *MemoryRepository) CreateClinicBooking(_ context.Context, booking ClinicBooking) (ClinicBooking, error) {

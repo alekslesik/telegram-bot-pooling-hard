@@ -50,7 +50,7 @@ func TestMemoryRepository_BookingLifecycle(t *testing.T) {
 	}
 	slot := slots[0]
 
-	booking, err := repo.CreateBooking(ctx, Booking{
+	booking, err := repo.ConfirmServiceBooking(ctx, Booking{
 		TelegramUserID: 1,
 		ServiceID:      services[0].ID,
 		SlotID:         slot.ID,
@@ -63,15 +63,21 @@ func TestMemoryRepository_BookingLifecycle(t *testing.T) {
 		t.Fatal("expected booking ID")
 	}
 
-	if err := repo.MarkSlotUnavailable(ctx, slot.ID); err != nil {
-		t.Fatalf("mark slot unavailable error: %v", err)
-	}
 	updated, err := repo.GetSlotByID(ctx, slot.ID)
 	if err != nil {
 		t.Fatalf("get slot error: %v", err)
 	}
 	if updated.IsAvailable {
 		t.Fatal("slot should be unavailable")
+	}
+
+	if _, err := repo.ConfirmServiceBooking(ctx, Booking{
+		TelegramUserID: 2,
+		ServiceID:      services[0].ID,
+		SlotID:         slot.ID,
+		Status:         "confirmed",
+	}); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound for already-booked slot, got: %v", err)
 	}
 }
 

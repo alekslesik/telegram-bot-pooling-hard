@@ -570,10 +570,7 @@ func (s *BookingService) handleConfirmation(ctx context.Context, userID int64, p
 		return true, "Please reply YES or NO.", nil
 	}
 
-	if err := s.repo.MarkSlotUnavailable(ctx, payload.SlotID); err != nil {
-		return true, "", err
-	}
-	booking, err := s.repo.CreateBooking(ctx, repository.Booking{
+	booking, err := s.repo.ConfirmServiceBooking(ctx, repository.Booking{
 		TelegramUserID: userID,
 		ServiceID:      payload.ServiceID,
 		SlotID:         payload.SlotID,
