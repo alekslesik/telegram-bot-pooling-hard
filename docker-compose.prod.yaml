@@ -1,4 +1,13 @@
+# Production on VPS: pull image from GHCR (no local build). Same layout as docker-compose.yaml.
+# Path example: /opt/bots/telegram-bot-pooling-hard — use a unique COMPOSE_PROJECT_NAME per bot on the host.
+
+name: ${COMPOSE_PROJECT_NAME:-telegram_bot_pooling_hard}
+
 services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine
     env_file:
@@ -31,9 +40,12 @@ services:
       DB_NAME: ${POSTGRES_DB:-telegram_bot_pooling_hard}
       DB_USER: ${POSTGRES_USER:-postgres}
       DB_PASSWORD_FILE: /run/secrets/postgres_password
+      REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_started
     restart: unless-stopped
 
 secrets:

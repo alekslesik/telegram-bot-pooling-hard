@@ -32,7 +32,7 @@ Build a medium-complexity Telegram bot for service appointments.
 
 ## Current Repository Status
 
-The project includes a Go bot scaffold, tests, Docker packaging, and CI (`.github/workflows/ci.yml`).  
+The project includes a Go bot scaffold, tests, Docker packaging, and CI/CD (`.github/workflows/ci.yml`, `release.yml`, `deploy.yml`).  
 **Booking:** MVP wizard с записью к врачу, отменой, документами, админ-инструментами по слотам.  
 **Level 3 (RFC):** профиль пользователя (`user_profiles`), списание баланса за запись, реферальные бонусы, RU/EN, события аналитики, опциональный Redis для кеша списка специализаций. Миграция `006_level3_profiles_analytics.sql`.
 
@@ -116,7 +116,7 @@ make docker-run
 make docker-compose-up
 ```
 
-The default [docker-compose.yaml](docker-compose.yaml) starts **PostgreSQL** with a `healthcheck` and starts the **bot only after the database is healthy** (`depends_on: condition: service_healthy`). Create **`secrets/postgres_password`** with the DB password (one line, no newline required). Compose mounts it as a [secret](https://docs.docker.com/compose/how-tos/use-secrets/) into Postgres (`POSTGRES_PASSWORD_FILE`) and the bot (`DB_PASSWORD_FILE`). Do not commit that file (see [.gitignore](.gitignore)).
+The default [docker-compose.yaml](docker-compose.yaml) starts **Redis**, **PostgreSQL** (with `healthcheck`), then the **bot** after Postgres is healthy. Set a unique **`COMPOSE_PROJECT_NAME`** in `.env` if several bots run on the same host (see [.env.example](.env.example)). Create **`secrets/postgres_password`** with the DB password (one line). Compose mounts it as a [secret](https://docs.docker.com/compose/how-tos/use-secrets/) into Postgres and the bot. Do not commit that file (see [.gitignore](.gitignore)).
 
 Stop:
 
@@ -126,41 +126,49 @@ make docker-compose-down
 
 ## CI/CD and Deployment
 
-The repository includes `ci.yml` (tests, `go vet`, Docker build). Release/deploy workflows can be added separately for your VPS pipeline.
+Workflows in [`.github/workflows`](.github/workflows):
 
-### VPS layout (multi-bot safe)
+| Workflow | Trigger | What it does |
+|----------|---------|----------------|
+| `ci.yml` | PR / push to `main` | `go test`, `go vet`, `docker build` |
+| `release.yml` | Push tag `v*` | Build and push `ghcr.io/alekslesik/telegram-bot-pooling-hard:<tag>` and `:latest`, then deploy to VPS |
+| `deploy.yml` | Manual (**Actions → Deploy → Run workflow**) | Redeploy an existing tag (default `latest`) without a new release |
 
-Recommended path for this project:
+### VPS layout (multi-bot on one server)
+
+Use a **separate directory per bot**, each with its own `.env`, `COMPOSE_PROJECT_NAME`, and `secrets/postgres_password`. Example for this project:
 
 ```bash
 /opt/bots/telegram-bot-pooling-hard
 ```
 
-Place `.env` in this folder on the server (token, username, `POSTGRES_*` names — **not** the DB password).  
-`docker-compose.prod.yaml` is uploaded during release deploy.
+On first deploy, create the folder and place **`.env`** on the server (token, username, `POSTGRES_*` — **not** the DB password). Each workflow run copies **`docker-compose.prod.yaml`** from the repo and writes **`secrets/postgres_password`** from **`VPS_POSTGRES_PASSWORD`**.
 
-The deploy job writes **`secrets/postgres_password`** on the VPS from **`VPS_POSTGRES_PASSWORD`** so the password never lives in the repo.
+### Required GitHub secrets (release + deploy)
 
-### Required GitHub secrets
+| Secret | Purpose |
+|--------|---------|
+| `VPS_HOST` | SSH host (IP or hostname) |
+| `VPS_USER` | SSH user (e.g. `root`) |
+| `VPS_SSH_KEY` | Private SSH key (full PEM) |
+| `VPS_APP_PATH` | e.g. `/opt/bots/telegram-bot-pooling-hard` |
+| `VPS_POSTGRES_PASSWORD` | DB password; written to `secrets/postgres_password` on the VPS |
+| `GHCR_READ_USER` | Optional: for **private** GHCR images |
+| `GHCR_READ_TOKEN` | Optional: PAT with `read:packages` |
 
-- `VPS_HOST`
-- `VPS_USER`
-- `VPS_SSH_KEY`
-- `VPS_APP_PATH` (set to `/opt/bots/telegram-bot-pooling-hard`)
-- `VPS_POSTGRES_PASSWORD` (database password; synced to `secrets/postgres_password` on the server each deploy)
-- `GHCR_READ_USER`
-- `GHCR_READ_TOKEN`
+If the GHCR image is **public**, login on the VPS is skipped when those two are empty.
 
 ### Release flow
 
-1. Create and push a tag:
+1. On `main`, create and push an annotated tag:
 
 ```bash
 git tag -a v1.2.3 -m "Release v1.2.3"
 git push origin v1.2.3
 ```
 
-2. Publish a GitHub Release for this tag.
-3. Workflow builds image `ghcr.io/<owner>/<repo>:vX.Y.Z` and deploys it to VPS.
+2. **Release** workflow publishes the image and deploys to `VPS_APP_PATH`.
 
-The bot runs in long polling mode, so no public webhook endpoint is required.
+3. Optional: **Deploy** workflow to roll out an already published tag again (e.g. after editing `.env` on the server).
+
+The bot uses **long polling**; no public webhook URL is required.
