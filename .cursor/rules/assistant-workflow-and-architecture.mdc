@@ -24,18 +24,20 @@ Run the full cycle:
 2. `make docker-compose-up` with startup/log verification
 3. `make docker-compose-down`
 4. Push branch and provide PR link
-5. Delete local feature branch
-6. Sync local `main` (`git fetch --prune origin` + `git pull --ff-only`)
-7. Create and push a new annotated tag
+5. Wait for GitHub Actions CI to pass (green), then merge the PR
+6. Delete local feature branch
+7. Sync local `main` (`git fetch --prune origin` + `git pull --ff-only`)
+8. Create and push a new annotated tag
 
 ## Docs/meta tasks (no runtime behavior change)
 
 Do a lightweight cycle:
 
 1. Commit + push + PR link
-2. Delete local feature branch
-3. Sync local `main`
-4. Skip runtime checks and skip release tag by default
+2. Wait for GitHub Actions CI to pass (green), then merge the PR
+3. Delete local feature branch
+4. Sync local `main`
+5. Skip local runtime checks and skip release tag by default
 
 # Git Safety
 

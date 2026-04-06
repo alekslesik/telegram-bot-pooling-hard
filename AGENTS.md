@@ -22,6 +22,7 @@ Then choose the flow by change type:
   - `make docker-compose-up` (verify startup and logs)
   - `make docker-compose-down`
 - After push/PR:
+  - wait for GitHub Actions CI to pass (green), then merge the PR
   - delete local feature branch
   - sync local `main` (`git fetch --prune origin` + `git pull --ff-only`)
   - create and push a new annotated tag
@@ -30,9 +31,10 @@ Then choose the flow by change type:
 
 - Use lightweight flow:
   - commit + push + PR
+  - wait for GitHub Actions CI to pass (green), then merge the PR
   - delete local feature branch
   - sync local `main`
-- Skip runtime checks and skip release tag unless explicitly requested.
+- Skip local runtime checks and skip release tag unless explicitly requested.
 
 ## Git Safety
 
