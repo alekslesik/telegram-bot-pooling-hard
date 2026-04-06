@@ -283,6 +283,46 @@ func (r *PostgresRepository) MarkSlotUnavailable(ctx context.Context, slotID int
 	return nil
 }
 
+func (r *PostgresRepository) ConfirmServiceBooking(ctx context.Context, booking Booking) (Booking, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Booking{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE slots
+		SET is_available = FALSE
+		WHERE id = $1 AND is_available = TRUE`, booking.SlotID)
+	if err != nil {
+		return Booking{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return Booking{}, err
+	}
+	if affected == 0 {
+		return Booking{}, ErrNotFound
+	}
+
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO bookings (telegram_user_id, service_id, slot_id, status)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id, created_at`,
+		booking.TelegramUserID,
+		booking.ServiceID,
+		booking.SlotID,
+		booking.Status,
+	).Scan(&booking.ID, &booking.CreatedAt)
+	if err != nil {
+		return Booking{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Booking{}, err
+	}
+	return booking, nil
+}
+
 func (r *PostgresRepository) CreateClinicBooking(ctx context.Context, booking ClinicBooking) (ClinicBooking, error) {
 	err := r.db.QueryRowContext(ctx, `
 		INSERT INTO clinic_bookings (telegram_user_id, specialty_id, doctor_id, doctor_slot_id, status)
