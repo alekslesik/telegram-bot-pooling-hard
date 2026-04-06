@@ -14,6 +14,10 @@ alwaysApply: true
 
 For each user task, always create a feature branch, commit with Conventional Commits, push, and provide a PR link.
 
+PR ownership preference:
+- Prepare branches/commits/PRs, but do **not** merge PRs unless the user explicitly asks.
+- In each PR body, include a concise changelog and a `Release notes draft` section.
+
 Then apply execution scope by task type:
 
 ## Code/runtime tasks (application behavior changes)
@@ -24,20 +28,22 @@ Run the full cycle:
 2. `make docker-compose-up` with startup/log verification
 3. `make docker-compose-down`
 4. Push branch and provide PR link
-5. Wait for GitHub Actions CI to pass (green), then merge the PR
-6. Delete local feature branch
-7. Sync local `main` (`git fetch --prune origin` + `git pull --ff-only`)
-8. Create and push a new annotated tag
+5. Wait for GitHub Actions CI to pass (green)
+6. Merge the PR only after explicit user confirmation/request
+7. Delete local feature branch
+8. Sync local `main` (`git fetch --prune origin` + `git pull --ff-only`)
+9. Create and push a new annotated tag
 
 ## Docs/meta tasks (no runtime behavior change)
 
 Do a lightweight cycle:
 
 1. Commit + push + PR link
-2. Wait for GitHub Actions CI to pass (green), then merge the PR
-3. Delete local feature branch
-4. Sync local `main`
-5. Skip local runtime checks and skip release tag by default
+2. Wait for GitHub Actions CI to pass (green)
+3. Merge the PR only after explicit user confirmation/request
+4. Delete local feature branch
+5. Sync local `main`
+6. Skip local runtime checks and skip release tag by default
 
 # Git Safety
 

@@ -6,7 +6,8 @@ alwaysApply: true
 # Merge after green CI
 
 - Do **not** merge a pull request until **required** GitHub Actions checks are **green** (success).
-- After opening or updating a PR, **wait** for CI to finish, then merge.
+- After opening or updating a PR, **wait** for CI to finish.
+- Merge only after explicit user confirmation/request.
 - Prefer GitHub CLI:
   - `gh pr checks <number> --watch` until all checks pass, then `gh pr merge ...`, or
   - `gh pr merge <number> --auto` (merges when required checks succeed; requires appropriate permissions and configured branch rules).

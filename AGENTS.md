@@ -13,6 +13,10 @@ This file captures how AI coding agents should operate in this repository.
 
 Always use a feature branch, commit with Conventional Commits, push, and provide a PR link.
 
+PR ownership preference:
+- The agent prepares branches/commits/PRs, but does **not** merge PRs unless the user explicitly asks.
+- Each PR body should include a clear changelog and a `Release notes draft` section for GitHub Releases.
+
 Then choose the flow by change type:
 
 ### Code/runtime changes
@@ -22,7 +26,8 @@ Then choose the flow by change type:
   - `make docker-compose-up` (verify startup and logs)
   - `make docker-compose-down`
 - After push/PR:
-  - wait for GitHub Actions CI to pass (green), then merge the PR
+  - wait for GitHub Actions CI to pass (green)
+  - merge the PR only after explicit user confirmation/request
   - delete local feature branch
   - sync local `main` (`git fetch --prune origin` + `git pull --ff-only`)
   - create and push a new annotated tag
@@ -31,7 +36,8 @@ Then choose the flow by change type:
 
 - Use lightweight flow:
   - commit + push + PR
-  - wait for GitHub Actions CI to pass (green), then merge the PR
+  - wait for GitHub Actions CI to pass (green)
+  - merge the PR only after explicit user confirmation/request
   - delete local feature branch
   - sync local `main`
 - Skip local runtime checks and skip release tag unless explicitly requested.
