@@ -82,11 +82,27 @@ Apply SQL migrations from [migrations](migrations) before running with PostgreSQ
 make run
 ```
 
-### Run tests
+### Testing
+
+Запуск всех тестов (как в CI):
+
+```bash
+go test ./...
+```
+
+Через Makefile:
 
 ```bash
 make test
 ```
+
+Полная локальная проверка перед релизом (форматирование, `vet`, `staticcheck`, тесты, `govulncheck`, сборка Docker-образа):
+
+```bash
+make preprod
+```
+
+В CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) выполняются `go test ./...`, `go vet ./...` и `docker build`. Тесты используют **in-memory** репозиторий, отдельная БД для `go test` не нужна.
 
 ### Run with Docker
 
