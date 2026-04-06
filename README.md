@@ -175,4 +175,10 @@ git push origin v1.2.3
 
 4. При необходимости повторного выката того же тега без новой сборки — workflow **Deploy** (ручной запуск).
 
+### Troubleshooting deploy (`manifest unknown`)
+
+- **Wrong image name** (`telegram-bot-pooling-middle` vs `...-hard`): this repo builds **`ghcr.io/alekslesik/telegram-bot-pooling-hard:<tag>`** only. On the VPS, ensure **`docker-compose.prod.yaml`** under `VPS_APP_PATH` matches the repo (each Release/Deploy run copies it from GitHub). Remove stale **`docker-compose.override.yaml`** or hand-edited compose that still points at `...-middle`. Check: `docker compose -f docker-compose.prod.yaml config | grep image:`.
+
+- **Tag missing in GHCR**: open the **Release** workflow run for your tag and confirm the **`image`** job succeeded. If it failed, fix the error and push a new tag (or re-run after fixing). The pull uses **`IMAGE_TAG`** from the tag name; the image must exist under **`telegram-bot-pooling-hard`**, not another package name.
+
 The bot uses **long polling**; no public webhook URL is required.
