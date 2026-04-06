@@ -104,6 +104,8 @@ make preprod
 
 В CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) выполняются `go test ./...`, `go vet ./...` и `docker build`. Тесты используют **in-memory** репозиторий, отдельная БД для `go test` не нужна.
 
+Перед тегом и релизом локально имеет смысл прогнать **`make preprod`** и при необходимости проверить **`docker compose up --build`** (есть `secrets/postgres_password` и `.env`).
+
 ### Run with Docker
 
 ```bash
@@ -160,15 +162,17 @@ If the GHCR image is **public**, login on the VPS is skipped when those two are 
 
 ### Release flow
 
-1. On `main`, create and push an annotated tag:
+1. В GitHub → **Settings → Secrets and variables → Actions** должны быть заданы секреты из таблицы выше (`VPS_*`, `VPS_POSTGRES_PASSWORD`, при необходимости `GHCR_*`).
+
+2. На актуальном `main` создайте и отправьте аннотированный тег версии:
 
 ```bash
 git tag -a v1.2.3 -m "Release v1.2.3"
 git push origin v1.2.3
 ```
 
-2. **Release** workflow publishes the image and deploys to `VPS_APP_PATH`.
+3. Workflow **Release** ([`.github/workflows/release.yml`](.github/workflows/release.yml)) соберёт образ, опубликует его в **GHCR** и выполнит деплой на VPS (`VPS_APP_PATH`). Прогресс смотрите во вкладке **Actions**.
 
-3. Optional: **Deploy** workflow to roll out an already published tag again (e.g. after editing `.env` on the server).
+4. При необходимости повторного выката того же тега без новой сборки — workflow **Deploy** (ручной запуск).
 
 The bot uses **long polling**; no public webhook URL is required.
