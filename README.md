@@ -167,8 +167,8 @@ If the GHCR image is **public**, login on the VPS is skipped when those two are 
 2. На актуальном `main` создайте и отправьте аннотированный тег версии:
 
 ```bash
-git tag -a v1.2.3 -m "Release v1.2.3"
-git push origin v1.2.3
+git tag -a v1.0.2 -m "Release v1.0.2"
+git push origin v1.0.2
 ```
 
 3. Workflow **Release** ([`.github/workflows/release.yml`](.github/workflows/release.yml)) соберёт образ, опубликует его в **GHCR** и выполнит деплой на VPS (`VPS_APP_PATH`). Прогресс смотрите во вкладке **Actions**.
@@ -177,7 +177,7 @@ git push origin v1.2.3
 
 ### Troubleshooting deploy (`manifest unknown`)
 
-- **Wrong image name** (`telegram-bot-pooling-middle` vs `...-hard`): this repo builds **`ghcr.io/alekslesik/telegram-bot-pooling-hard:<tag>`** only. On the VPS, ensure **`docker-compose.prod.yaml`** under `VPS_APP_PATH` matches the repo (each Release/Deploy run copies it from GitHub). Remove stale **`docker-compose.override.yaml`** or hand-edited compose that still points at `...-middle`. Check: `docker compose -f docker-compose.prod.yaml config | grep image:`.
+- **Wrong image name**: this repo publishes only **`ghcr.io/alekslesik/telegram-bot-pooling-hard:<tag>`**. On the VPS, ensure **`docker-compose.prod.yaml`** under `VPS_APP_PATH` matches the repo (each Release/Deploy run copies it from GitHub). Remove stale **`docker-compose.override.yaml`** or any hand-edited compose that points at a different GHCR package. Check: `docker compose -f docker-compose.prod.yaml config | grep image:`.
 
 - **Tag missing in GHCR**: open the **Release** workflow run for your tag and confirm the **`image`** job succeeded. If it failed, fix the error and push a new tag (or re-run after fixing). The pull uses **`IMAGE_TAG`** from the tag name; the image must exist under **`telegram-bot-pooling-hard`**, not another package name.
 
