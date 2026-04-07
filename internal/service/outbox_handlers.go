@@ -51,6 +51,7 @@ func handleBookingConfirmedEvent(ctx context.Context, repo repository.BookingRep
 	}
 	bookingID := payload.BookingID
 	_, err = repo.EnqueueOutboxEvent(ctx, repository.OutboxEvent{
+		DedupeKey:     fmt.Sprintf("booking_reminder_due:%d", payload.BookingID),
 		EventType:     "booking_reminder_due",
 		AggregateType: "clinic_booking",
 		AggregateID:   &bookingID,

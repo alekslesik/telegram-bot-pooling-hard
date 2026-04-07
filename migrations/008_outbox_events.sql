@@ -2,6 +2,7 @@
 
 CREATE TABLE IF NOT EXISTS outbox_events (
     id BIGSERIAL PRIMARY KEY,
+    dedupe_key TEXT UNIQUE,
     event_type TEXT NOT NULL,
     aggregate_type TEXT NOT NULL,
     aggregate_id BIGINT,

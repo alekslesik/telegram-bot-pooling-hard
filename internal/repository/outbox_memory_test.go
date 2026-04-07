@@ -106,3 +106,30 @@ func TestMemoryRepository_OutboxNotFound(t *testing.T) {
 		t.Fatalf("expected ErrNotFound for mark failed, got %v", err)
 	}
 }
+
+func TestMemoryRepository_OutboxDedupeKey(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	key := "booking_reminder_due:42"
+	ev1, err := repo.EnqueueOutboxEvent(ctx, OutboxEvent{
+		DedupeKey:     key,
+		EventType:     "booking_reminder_due",
+		AggregateType: "clinic_booking",
+		PayloadJSON:   `{"booking_id":42}`,
+	})
+	if err != nil {
+		t.Fatalf("enqueue #1 error: %v", err)
+	}
+	ev2, err := repo.EnqueueOutboxEvent(ctx, OutboxEvent{
+		DedupeKey:     key,
+		EventType:     "booking_reminder_due",
+		AggregateType: "clinic_booking",
+		PayloadJSON:   `{"booking_id":42}`,
+	})
+	if err != nil {
+		t.Fatalf("enqueue #2 error: %v", err)
+	}
+	if ev1.ID != ev2.ID {
+		t.Fatalf("expected deduped outbox id, got %d and %d", ev1.ID, ev2.ID)
+	}
+}
