@@ -27,20 +27,36 @@ func TestBookingOutboxHandler_EnqueuesReminderEvent(t *testing.T) {
 	if err := worker.Tick(ctx); err != nil {
 		t.Fatalf("tick error: %v", err)
 	}
+	// Reprocessing should not enqueue duplicate reminder due events.
+	if _, err := repo.EnqueueOutboxEvent(ctx, repository.OutboxEvent{
+		EventType:     "booking_confirmed",
+		AggregateType: "clinic_booking",
+		PayloadJSON:   payload,
+		AvailableAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("enqueue duplicate booking_confirmed: %v", err)
+	}
+	if err := worker.Tick(ctx); err != nil {
+		t.Fatalf("tick duplicate error: %v", err)
+	}
 
 	claimed, err := repo.ClaimDueOutboxEvents(ctx, 10, time.Now().UTC().Add(365*24*time.Hour))
 	if err != nil {
 		t.Fatalf("claim reminders: %v", err)
 	}
 	found := false
+	reminderCount := 0
 	for _, ev := range claimed {
 		if ev.EventType == "booking_reminder_due" {
 			found = true
-			break
+			reminderCount++
 		}
 	}
 	if !found {
 		t.Fatalf("expected booking_reminder_due event to be enqueued")
+	}
+	if reminderCount != 1 {
+		t.Fatalf("expected exactly one reminder event, got %d", reminderCount)
 	}
 }
 
