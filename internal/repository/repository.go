@@ -242,6 +242,7 @@ type BookingRepository interface {
 	ClaimDueOutboxEvents(ctx context.Context, limit int, now time.Time) ([]OutboxEvent, error)
 	MarkOutboxEventDone(ctx context.Context, eventID int64) error
 	MarkOutboxEventFailed(ctx context.Context, eventID int64, lastError string, nextAttemptAt time.Time) error
+	CountOutboxByStatus(ctx context.Context) (map[string]int64, error)
 }
 
 type MemoryRepository struct {
@@ -1457,4 +1458,18 @@ func (r *MemoryRepository) MarkOutboxEventFailed(_ context.Context, eventID int6
 	ev.UpdatedAt = time.Now().UTC()
 	r.outboxEvents[eventID] = ev
 	return nil
+}
+
+func (r *MemoryRepository) CountOutboxByStatus(_ context.Context) (map[string]int64, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := map[string]int64{
+		"pending":    0,
+		"processing": 0,
+		"done":       0,
+	}
+	for _, ev := range r.outboxEvents {
+		out[ev.Status]++
+	}
+	return out, nil
 }

@@ -1227,6 +1227,31 @@ func (r *PostgresRepository) MarkOutboxEventFailed(ctx context.Context, eventID 
 	return nil
 }
 
+func (r *PostgresRepository) CountOutboxByStatus(ctx context.Context) (map[string]int64, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT status, COUNT(*)
+		FROM outbox_events
+		GROUP BY status`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{
+		"pending":    0,
+		"processing": 0,
+		"done":       0,
+	}
+	for rows.Next() {
+		var status string
+		var n int64
+		if err := rows.Scan(&status, &n); err != nil {
+			return nil, err
+		}
+		out[status] = n
+	}
+	return out, rows.Err()
+}
+
 func (r *PostgresRepository) enqueueOutboxEventTx(ctx context.Context, tx *sql.Tx, event OutboxEvent) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO outbox_events (dedupe_key, event_type, aggregate_type, aggregate_id, payload_json, status, attempts, available_at)
