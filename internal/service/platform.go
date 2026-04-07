@@ -86,12 +86,26 @@ func (s *BookingService) AdminAnalyticsReport(ctx context.Context, adminUserID i
 	if err != nil {
 		return "", err
 	}
+	outbox, err := s.repo.CountOutboxByStatus(ctx)
+	if err != nil {
+		return "", err
+	}
 	if len(counts) == 0 {
-		return "", nil
+		lines := []string{
+			fmt.Sprintf("- outbox_pending: %d", outbox["pending"]),
+			fmt.Sprintf("- outbox_processing: %d", outbox["processing"]),
+			fmt.Sprintf("- outbox_done: %d", outbox["done"]),
+		}
+		return strings.Join(lines, "\n"), nil
 	}
 	var lines []string
 	for k, v := range counts {
 		lines = append(lines, fmt.Sprintf("- %s: %d", k, v))
 	}
+	lines = append(lines,
+		fmt.Sprintf("- outbox_pending: %d", outbox["pending"]),
+		fmt.Sprintf("- outbox_processing: %d", outbox["processing"]),
+		fmt.Sprintf("- outbox_done: %d", outbox["done"]),
+	)
 	return strings.Join(lines, "\n"), nil
 }

@@ -1227,6 +1227,54 @@ func (r *PostgresRepository) MarkOutboxEventFailed(ctx context.Context, eventID 
 	return nil
 }
 
+func (r *PostgresRepository) MarkOutboxEventDead(ctx context.Context, eventID int64, lastError string) error {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE outbox_events
+		SET status = 'failed',
+		    locked_at = NULL,
+		    last_error = $2,
+		    processed_at = NOW(),
+		    updated_at = NOW()
+		WHERE id = $1`, eventID, strings.TrimSpace(lastError))
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *PostgresRepository) CountOutboxByStatus(ctx context.Context) (map[string]int64, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT status, COUNT(*)
+		FROM outbox_events
+		GROUP BY status`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{
+		"pending":    0,
+		"processing": 0,
+		"done":       0,
+		"failed":     0,
+	}
+	for rows.Next() {
+		var status string
+		var n int64
+		if err := rows.Scan(&status, &n); err != nil {
+			return nil, err
+		}
+		out[status] = n
+	}
+	return out, rows.Err()
+}
+
 func (r *PostgresRepository) enqueueOutboxEventTx(ctx context.Context, tx *sql.Tx, event OutboxEvent) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO outbox_events (dedupe_key, event_type, aggregate_type, aggregate_id, payload_json, status, attempts, available_at)

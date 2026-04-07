@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS outbox_events (
     aggregate_type TEXT NOT NULL,
     aggregate_id BIGINT,
     payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'done')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'done', 'failed')),
     attempts INT NOT NULL DEFAULT 0,
     available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     locked_at TIMESTAMPTZ,

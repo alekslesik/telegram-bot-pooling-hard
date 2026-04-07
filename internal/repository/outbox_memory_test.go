@@ -105,6 +105,9 @@ func TestMemoryRepository_OutboxNotFound(t *testing.T) {
 	if err := repo.MarkOutboxEventFailed(ctx, 999999, "x", time.Now().UTC()); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for mark failed, got %v", err)
 	}
+	if err := repo.MarkOutboxEventDead(ctx, 999999, "x"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for mark dead, got %v", err)
+	}
 }
 
 func TestMemoryRepository_OutboxDedupeKey(t *testing.T) {
@@ -131,5 +134,36 @@ func TestMemoryRepository_OutboxDedupeKey(t *testing.T) {
 	}
 	if ev1.ID != ev2.ID {
 		t.Fatalf("expected deduped outbox id, got %d and %d", ev1.ID, ev2.ID)
+	}
+}
+
+func TestMemoryRepository_CountOutboxByStatus(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	_, _ = repo.EnqueueOutboxEvent(ctx, OutboxEvent{
+		EventType:     "booking_confirmed",
+		AggregateType: "clinic_booking",
+		PayloadJSON:   `{"booking_id":11}`,
+		AvailableAt:   now,
+	})
+	_, _ = repo.EnqueueOutboxEvent(ctx, OutboxEvent{
+		EventType:     "booking_confirmed",
+		AggregateType: "clinic_booking",
+		PayloadJSON:   `{"booking_id":12}`,
+		AvailableAt:   now.Add(1 * time.Hour),
+	})
+	claimed, err := repo.ClaimDueOutboxEvents(ctx, 1, now)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim error: %v len=%d", err, len(claimed))
+	}
+
+	counts, err := repo.CountOutboxByStatus(ctx)
+	if err != nil {
+		t.Fatalf("count outbox by status error: %v", err)
+	}
+	if counts["pending"] != 1 || counts["processing"] != 1 || counts["done"] != 0 {
+		t.Fatalf("unexpected outbox counts: %+v", counts)
 	}
 }
