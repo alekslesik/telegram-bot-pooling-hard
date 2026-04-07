@@ -435,6 +435,15 @@ func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bo
 			WHERE id = $1`, slotID); err != nil {
 			return CancelClinicBookingResult{}, err
 		}
+		bookingIDCopy := bookingID
+		if err = r.enqueueOutboxEventTx(ctx, tx, OutboxEvent{
+			EventType:     "booking_cancelled",
+			AggregateType: "clinic_booking",
+			AggregateID:   &bookingIDCopy,
+			PayloadJSON:   fmt.Sprintf(`{"booking_id":%d,"user_id":%d}`, bookingID, userID),
+		}); err != nil {
+			return CancelClinicBookingResult{}, err
+		}
 
 		var debitAmount int64
 		err = tx.QueryRowContext(ctx, `
@@ -491,6 +500,14 @@ func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bo
 					) VALUES ($1, $2, 'refund', $3, $4, $5, $6, '{}'::jsonb)`,
 					userID, refundOp, refunded, before, balanceAfter, bookingID)
 				if err != nil {
+					return CancelClinicBookingResult{}, err
+				}
+				if err = r.enqueueOutboxEventTx(ctx, tx, OutboxEvent{
+					EventType:     "booking_refunded",
+					AggregateType: "clinic_booking",
+					AggregateID:   &bookingIDCopy,
+					PayloadJSON:   fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"refunded_cents":%d}`, bookingID, userID, refunded),
+				}); err != nil {
 					return CancelClinicBookingResult{}, err
 				}
 				refundApplied = true
@@ -1069,6 +1086,15 @@ func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userI
 	if err != nil {
 		return PaidBookingResult{}, err
 	}
+	bookingIDCopy := bookingID
+	if err = r.enqueueOutboxEventTx(ctx, tx, OutboxEvent{
+		EventType:     "booking_confirmed",
+		AggregateType: "clinic_booking",
+		AggregateID:   &bookingIDCopy,
+		PayloadJSON:   fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"specialty_id":%d,"doctor_id":%d,"slot_id":%d}`, bookingID, userID, specialtyID, doctorID, slotID),
+	}); err != nil {
+		return PaidBookingResult{}, err
+	}
 
 	var specName, docName string
 	err = tx.QueryRowContext(ctx, `
@@ -1091,4 +1117,129 @@ func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userI
 		BalanceAfter:   newBal,
 		BookingCreated: createdAt,
 	}, nil
+}
+
+func (r *PostgresRepository) EnqueueOutboxEvent(ctx context.Context, event OutboxEvent) (OutboxEvent, error) {
+	err := r.db.QueryRowContext(ctx, `
+		INSERT INTO outbox_events (event_type, aggregate_type, aggregate_id, payload_json, status, attempts, available_at)
+		VALUES ($1, $2, $3, $4::jsonb, 'pending', 0, COALESCE($5, NOW()))
+		RETURNING id, status, attempts, available_at, created_at, updated_at`,
+		event.EventType, event.AggregateType, event.AggregateID, coalesceJSON(event.PayloadJSON), nullIfZeroTime(event.AvailableAt)).
+		Scan(&event.ID, &event.Status, &event.Attempts, &event.AvailableAt, &event.CreatedAt, &event.UpdatedAt)
+	if err != nil {
+		return OutboxEvent{}, err
+	}
+	event.PayloadJSON = coalesceJSON(event.PayloadJSON)
+	return event, nil
+}
+
+func (r *PostgresRepository) ClaimDueOutboxEvents(ctx context.Context, limit int, now time.Time) ([]OutboxEvent, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		WITH picked AS (
+			SELECT id
+			FROM outbox_events
+			WHERE status = 'pending'
+			  AND available_at <= $1
+			ORDER BY id ASC
+			FOR UPDATE SKIP LOCKED
+			LIMIT $2
+		)
+		UPDATE outbox_events o
+		SET status = 'processing',
+		    attempts = o.attempts + 1,
+		    locked_at = NOW(),
+		    updated_at = NOW()
+		FROM picked
+		WHERE o.id = picked.id
+		RETURNING o.id, o.event_type, o.aggregate_type, o.aggregate_id, o.payload_json::text,
+		          o.status, o.attempts, o.available_at, o.locked_at, o.processed_at, o.last_error, o.created_at, o.updated_at`,
+		now, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []OutboxEvent
+	for rows.Next() {
+		var ev OutboxEvent
+		if err := rows.Scan(&ev.ID, &ev.EventType, &ev.AggregateType, &ev.AggregateID, &ev.PayloadJSON,
+			&ev.Status, &ev.Attempts, &ev.AvailableAt, &ev.LockedAt, &ev.ProcessedAt, &ev.LastError, &ev.CreatedAt, &ev.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, ev)
+	}
+	return out, rows.Err()
+}
+
+func (r *PostgresRepository) MarkOutboxEventDone(ctx context.Context, eventID int64) error {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE outbox_events
+		SET status = 'done',
+		    processed_at = NOW(),
+		    locked_at = NULL,
+		    updated_at = NOW()
+		WHERE id = $1`, eventID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *PostgresRepository) MarkOutboxEventFailed(ctx context.Context, eventID int64, lastError string, nextAttemptAt time.Time) error {
+	if nextAttemptAt.IsZero() {
+		nextAttemptAt = time.Now().UTC().Add(30 * time.Second)
+	}
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE outbox_events
+		SET status = 'pending',
+		    locked_at = NULL,
+		    last_error = $2,
+		    available_at = $3,
+		    updated_at = NOW()
+		WHERE id = $1`, eventID, strings.TrimSpace(lastError), nextAttemptAt)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *PostgresRepository) enqueueOutboxEventTx(ctx context.Context, tx *sql.Tx, event OutboxEvent) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO outbox_events (event_type, aggregate_type, aggregate_id, payload_json, status, attempts, available_at)
+		VALUES ($1, $2, $3, $4::jsonb, 'pending', 0, COALESCE($5, NOW()))`,
+		event.EventType, event.AggregateType, event.AggregateID, coalesceJSON(event.PayloadJSON), nullIfZeroTime(event.AvailableAt))
+	return err
+}
+
+func nullIfZeroTime(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t
+}
+
+func coalesceJSON(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return "{}"
+	}
+	return raw
 }

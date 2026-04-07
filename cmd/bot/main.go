@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"os"
@@ -147,12 +148,23 @@ func main() {
 
 	var specCache service.SpecialtyPageCache = redisCache
 	bookingService := service.NewBookingService(bookingRepo, specCache)
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	defer workerCancel()
 
 	h := bot.Handlers{
 		Bot:         tg,
 		Logger:      logger,
 		Booking:     bookingService,
 		BotUsername: tg.Self.UserName,
+	}
+
+	if outboxWorkerEnabled() {
+		outboxWorker := service.NewOutboxWorker(bookingRepo, func(ctx context.Context, event repository.OutboxEvent) error {
+			logger.Info("outbox processed", "id", event.ID, "event_type", event.EventType, "aggregate_type", event.AggregateType)
+			return nil
+		}, 20, 30*time.Second)
+		go outboxWorker.Run(workerCtx, 2*time.Second)
+		logger.Info("outbox worker enabled")
 	}
 
 	logger.Info("bot started with long polling, press Ctrl+C to stop")
@@ -164,9 +176,15 @@ func main() {
 
 		case sig := <-stop:
 			logger.Info("received signal, shutting down", "signal", sig.String())
+			workerCancel()
 			return
 		}
 	}
+}
+
+func outboxWorkerEnabled() bool {
+	raw := strings.TrimSpace(strings.ToLower(os.Getenv("OUTBOX_WORKER_ENABLED")))
+	return raw == "" || raw == "1" || raw == "true" || raw == "yes" || raw == "on"
 }
 
 func buildBookingRepository(logger slogLogger) (repository.BookingRepository, error) {

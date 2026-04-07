@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -126,6 +127,22 @@ type WalletTransaction struct {
 	CreatedAt        time.Time
 }
 
+type OutboxEvent struct {
+	ID            int64
+	EventType     string
+	AggregateType string
+	AggregateID   *int64
+	PayloadJSON   string
+	Status        string
+	Attempts      int
+	AvailableAt   time.Time
+	LockedAt      *time.Time
+	ProcessedAt   *time.Time
+	LastError     string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
 type UserDocument struct {
 	ID             int64
 	TelegramUserID int64
@@ -220,6 +237,10 @@ type BookingRepository interface {
 	LogAnalyticsEvent(ctx context.Context, userID *int64, eventType, payloadJSON string) error
 	CountAnalyticsByEventSince(ctx context.Context, since time.Time) (map[string]int64, error)
 	ConfirmPaidClinicBooking(ctx context.Context, userID, feeCents, specialtyID, doctorID, slotID int64, operationID string) (PaidBookingResult, error)
+	EnqueueOutboxEvent(ctx context.Context, event OutboxEvent) (OutboxEvent, error)
+	ClaimDueOutboxEvents(ctx context.Context, limit int, now time.Time) ([]OutboxEvent, error)
+	MarkOutboxEventDone(ctx context.Context, eventID int64) error
+	MarkOutboxEventFailed(ctx context.Context, eventID int64, lastError string, nextAttemptAt time.Time) error
 }
 
 type MemoryRepository struct {
@@ -251,6 +272,8 @@ type MemoryRepository struct {
 	walletTx        map[int64]WalletTransaction
 	walletTxByOp    map[string]int64
 	nextWalletTxID  int64
+	outboxEvents    map[int64]OutboxEvent
+	nextOutboxID    int64
 }
 
 type memoryAnalyticsEvent struct {
@@ -288,6 +311,8 @@ func NewMemoryRepository() *MemoryRepository {
 		walletTx:        make(map[int64]WalletTransaction),
 		walletTxByOp:    make(map[string]int64),
 		nextWalletTxID:  1,
+		outboxEvents:    make(map[int64]OutboxEvent),
+		nextOutboxID:    1,
 	}
 	r.seed()
 	return r
@@ -522,6 +547,8 @@ func (r *MemoryRepository) CancelClinicBooking(_ context.Context, userID, bookin
 	b.Status = "cancelled"
 	b.CancelledAt = &now
 	r.clinicBooking[bookingID] = b
+	bookingIDCopy := bookingID
+	_ = r.enqueueOutboxLocked("booking_cancelled", "clinic_booking", &bookingIDCopy, fmt.Sprintf(`{"booking_id":%d,"user_id":%d}`, bookingID, userID), now)
 
 	var refunded int64
 	var balanceAfter int64
@@ -561,6 +588,7 @@ func (r *MemoryRepository) CancelClinicBooking(_ context.Context, userID, bookin
 		r.walletTx[wtx.ID] = wtx
 		r.walletTxByOp[refundOp] = wtx.ID
 		r.nextWalletTxID++
+		_ = r.enqueueOutboxLocked("booking_refunded", "clinic_booking", &bookingIDCopy, fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"refunded_cents":%d}`, bookingID, userID, refunded), now)
 		break
 	}
 	return CancelClinicBookingResult{
@@ -1306,6 +1334,8 @@ func (r *MemoryRepository) ConfirmPaidClinicBooking(_ context.Context, userID, f
 	r.walletTx[wtx.ID] = wtx
 	r.walletTxByOp[operationID] = wtx.ID
 	r.nextWalletTxID++
+	bookingIDCopy := booking.ID
+	_ = r.enqueueOutboxLocked("booking_confirmed", "clinic_booking", &bookingIDCopy, fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"specialty_id":%d,"doctor_id":%d,"slot_id":%d}`, booking.ID, userID, specialtyID, doctorID, slotID), booking.CreatedAt)
 
 	spec := r.specialties[specialtyID]
 	doc := r.doctors[doctorID]
@@ -1318,4 +1348,104 @@ func (r *MemoryRepository) ConfirmPaidClinicBooking(_ context.Context, userID, f
 		BalanceAfter:   p.BalanceCents,
 		BookingCreated: booking.CreatedAt,
 	}, nil
+}
+
+func (r *MemoryRepository) EnqueueOutboxEvent(_ context.Context, event OutboxEvent) (OutboxEvent, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.enqueueOutboxLocked(event.EventType, event.AggregateType, event.AggregateID, event.PayloadJSON, event.AvailableAt), nil
+}
+
+func (r *MemoryRepository) enqueueOutboxLocked(eventType, aggregateType string, aggregateID *int64, payload string, availableAt time.Time) OutboxEvent {
+	now := time.Now().UTC()
+	if availableAt.IsZero() {
+		availableAt = now
+	}
+	if strings.TrimSpace(payload) == "" {
+		payload = "{}"
+	}
+	id := r.nextOutboxID
+	r.nextOutboxID++
+	ev := OutboxEvent{
+		ID:            id,
+		EventType:     strings.TrimSpace(eventType),
+		AggregateType: strings.TrimSpace(aggregateType),
+		AggregateID:   aggregateID,
+		PayloadJSON:   payload,
+		Status:        "pending",
+		Attempts:      0,
+		AvailableAt:   availableAt,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	r.outboxEvents[id] = ev
+	return ev
+}
+
+func (r *MemoryRepository) ClaimDueOutboxEvents(_ context.Context, limit int, now time.Time) ([]OutboxEvent, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if limit <= 0 {
+		limit = 10
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	ids := make([]int64, 0, len(r.outboxEvents))
+	for id, ev := range r.outboxEvents {
+		if ev.Status == "pending" && !ev.AvailableAt.After(now) {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	if len(ids) > limit {
+		ids = ids[:limit]
+	}
+	out := make([]OutboxEvent, 0, len(ids))
+	for _, id := range ids {
+		ev := r.outboxEvents[id]
+		lockTime := now
+		ev.Status = "processing"
+		ev.Attempts++
+		ev.LockedAt = &lockTime
+		ev.UpdatedAt = now
+		r.outboxEvents[id] = ev
+		out = append(out, ev)
+	}
+	return out, nil
+}
+
+func (r *MemoryRepository) MarkOutboxEventDone(_ context.Context, eventID int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ev, ok := r.outboxEvents[eventID]
+	if !ok {
+		return ErrNotFound
+	}
+	now := time.Now().UTC()
+	ev.Status = "done"
+	ev.LockedAt = nil
+	ev.ProcessedAt = &now
+	ev.UpdatedAt = now
+	r.outboxEvents[eventID] = ev
+	return nil
+}
+
+func (r *MemoryRepository) MarkOutboxEventFailed(_ context.Context, eventID int64, lastError string, nextAttemptAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ev, ok := r.outboxEvents[eventID]
+	if !ok {
+		return ErrNotFound
+	}
+	if nextAttemptAt.IsZero() {
+		nextAttemptAt = time.Now().UTC().Add(30 * time.Second)
+	}
+	ev.Status = "pending"
+	ev.LockedAt = nil
+	ev.LastError = strings.TrimSpace(lastError)
+	ev.AvailableAt = nextAttemptAt
+	ev.UpdatedAt = time.Now().UTC()
+	r.outboxEvents[eventID] = ev
+	return nil
 }
