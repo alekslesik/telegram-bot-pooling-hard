@@ -159,7 +159,12 @@ func main() {
 	}
 
 	if outboxWorkerEnabled() {
-		outboxWorker := service.NewOutboxWorker(bookingRepo, service.NewBookingOutboxHandler(bookingRepo), 20, 30*time.Second)
+		reminderNotifier := func(ctx context.Context, userID int64, text string) error {
+			msg := tgbotapi.NewMessage(userID, text)
+			_, err := tg.Send(msg)
+			return err
+		}
+		outboxWorker := service.NewOutboxWorker(bookingRepo, service.NewBookingOutboxHandler(bookingRepo, reminderNotifier), 20, 30*time.Second)
 		go outboxWorker.Run(workerCtx, 2*time.Second)
 		logger.Info("outbox worker enabled")
 	}

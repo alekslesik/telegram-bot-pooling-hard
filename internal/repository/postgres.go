@@ -437,6 +437,7 @@ func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bo
 		}
 		bookingIDCopy := bookingID
 		if err = r.enqueueOutboxEventTx(ctx, tx, OutboxEvent{
+			DedupeKey:     fmt.Sprintf("booking_cancelled:%d", bookingID),
 			EventType:     "booking_cancelled",
 			AggregateType: "clinic_booking",
 			AggregateID:   &bookingIDCopy,
@@ -503,6 +504,7 @@ func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bo
 					return CancelClinicBookingResult{}, err
 				}
 				if err = r.enqueueOutboxEventTx(ctx, tx, OutboxEvent{
+					DedupeKey:     fmt.Sprintf("booking_refunded:%d", bookingID),
 					EventType:     "booking_refunded",
 					AggregateType: "clinic_booking",
 					AggregateID:   &bookingIDCopy,
@@ -1088,6 +1090,7 @@ func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userI
 	}
 	bookingIDCopy := bookingID
 	if err = r.enqueueOutboxEventTx(ctx, tx, OutboxEvent{
+		DedupeKey:     fmt.Sprintf("booking_confirmed:%d", bookingID),
 		EventType:     "booking_confirmed",
 		AggregateType: "clinic_booking",
 		AggregateID:   &bookingIDCopy,
@@ -1121,11 +1124,13 @@ func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userI
 
 func (r *PostgresRepository) EnqueueOutboxEvent(ctx context.Context, event OutboxEvent) (OutboxEvent, error) {
 	err := r.db.QueryRowContext(ctx, `
-		INSERT INTO outbox_events (event_type, aggregate_type, aggregate_id, payload_json, status, attempts, available_at)
-		VALUES ($1, $2, $3, $4::jsonb, 'pending', 0, COALESCE($5, NOW()))
-		RETURNING id, status, attempts, available_at, created_at, updated_at`,
-		event.EventType, event.AggregateType, event.AggregateID, coalesceJSON(event.PayloadJSON), nullIfZeroTime(event.AvailableAt)).
-		Scan(&event.ID, &event.Status, &event.Attempts, &event.AvailableAt, &event.CreatedAt, &event.UpdatedAt)
+		INSERT INTO outbox_events (dedupe_key, event_type, aggregate_type, aggregate_id, payload_json, status, attempts, available_at)
+		VALUES ($1, $2, $3, $4, $5::jsonb, 'pending', 0, COALESCE($6, NOW()))
+		ON CONFLICT (dedupe_key) DO UPDATE
+		SET dedupe_key = EXCLUDED.dedupe_key
+		RETURNING id, dedupe_key, status, attempts, available_at, created_at, updated_at`,
+		nullIfBlank(event.DedupeKey), event.EventType, event.AggregateType, event.AggregateID, coalesceJSON(event.PayloadJSON), nullIfZeroTime(event.AvailableAt)).
+		Scan(&event.ID, &event.DedupeKey, &event.Status, &event.Attempts, &event.AvailableAt, &event.CreatedAt, &event.UpdatedAt)
 	if err != nil {
 		return OutboxEvent{}, err
 	}
@@ -1157,7 +1162,7 @@ func (r *PostgresRepository) ClaimDueOutboxEvents(ctx context.Context, limit int
 		    updated_at = NOW()
 		FROM picked
 		WHERE o.id = picked.id
-		RETURNING o.id, o.event_type, o.aggregate_type, o.aggregate_id, o.payload_json::text,
+		RETURNING o.id, o.dedupe_key, o.event_type, o.aggregate_type, o.aggregate_id, o.payload_json::text,
 		          o.status, o.attempts, o.available_at, o.locked_at, o.processed_at, o.last_error, o.created_at, o.updated_at`,
 		now, limit)
 	if err != nil {
@@ -1167,7 +1172,7 @@ func (r *PostgresRepository) ClaimDueOutboxEvents(ctx context.Context, limit int
 	var out []OutboxEvent
 	for rows.Next() {
 		var ev OutboxEvent
-		if err := rows.Scan(&ev.ID, &ev.EventType, &ev.AggregateType, &ev.AggregateID, &ev.PayloadJSON,
+		if err := rows.Scan(&ev.ID, &ev.DedupeKey, &ev.EventType, &ev.AggregateType, &ev.AggregateID, &ev.PayloadJSON,
 			&ev.Status, &ev.Attempts, &ev.AvailableAt, &ev.LockedAt, &ev.ProcessedAt, &ev.LastError, &ev.CreatedAt, &ev.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -1224,9 +1229,10 @@ func (r *PostgresRepository) MarkOutboxEventFailed(ctx context.Context, eventID 
 
 func (r *PostgresRepository) enqueueOutboxEventTx(ctx context.Context, tx *sql.Tx, event OutboxEvent) error {
 	_, err := tx.ExecContext(ctx, `
-		INSERT INTO outbox_events (event_type, aggregate_type, aggregate_id, payload_json, status, attempts, available_at)
-		VALUES ($1, $2, $3, $4::jsonb, 'pending', 0, COALESCE($5, NOW()))`,
-		event.EventType, event.AggregateType, event.AggregateID, coalesceJSON(event.PayloadJSON), nullIfZeroTime(event.AvailableAt))
+		INSERT INTO outbox_events (dedupe_key, event_type, aggregate_type, aggregate_id, payload_json, status, attempts, available_at)
+		VALUES ($1, $2, $3, $4, $5::jsonb, 'pending', 0, COALESCE($6, NOW()))
+		ON CONFLICT (dedupe_key) DO NOTHING`,
+		nullIfBlank(event.DedupeKey), event.EventType, event.AggregateType, event.AggregateID, coalesceJSON(event.PayloadJSON), nullIfZeroTime(event.AvailableAt))
 	return err
 }
 
@@ -1240,6 +1246,13 @@ func nullIfZeroTime(t time.Time) any {
 func coalesceJSON(raw string) string {
 	if strings.TrimSpace(raw) == "" {
 		return "{}"
+	}
+	return raw
+}
+
+func nullIfBlank(raw string) any {
+	if strings.TrimSpace(raw) == "" {
+		return nil
 	}
 	return raw
 }

@@ -129,6 +129,7 @@ type WalletTransaction struct {
 
 type OutboxEvent struct {
 	ID            int64
+	DedupeKey     string
 	EventType     string
 	AggregateType string
 	AggregateID   *int64
@@ -548,7 +549,7 @@ func (r *MemoryRepository) CancelClinicBooking(_ context.Context, userID, bookin
 	b.CancelledAt = &now
 	r.clinicBooking[bookingID] = b
 	bookingIDCopy := bookingID
-	_ = r.enqueueOutboxLocked("booking_cancelled", "clinic_booking", &bookingIDCopy, fmt.Sprintf(`{"booking_id":%d,"user_id":%d}`, bookingID, userID), now)
+	_ = r.enqueueOutboxLocked(fmt.Sprintf("booking_cancelled:%d", bookingID), "booking_cancelled", "clinic_booking", &bookingIDCopy, fmt.Sprintf(`{"booking_id":%d,"user_id":%d}`, bookingID, userID), now)
 
 	var refunded int64
 	var balanceAfter int64
@@ -588,7 +589,7 @@ func (r *MemoryRepository) CancelClinicBooking(_ context.Context, userID, bookin
 		r.walletTx[wtx.ID] = wtx
 		r.walletTxByOp[refundOp] = wtx.ID
 		r.nextWalletTxID++
-		_ = r.enqueueOutboxLocked("booking_refunded", "clinic_booking", &bookingIDCopy, fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"refunded_cents":%d}`, bookingID, userID, refunded), now)
+		_ = r.enqueueOutboxLocked(fmt.Sprintf("booking_refunded:%d", bookingID), "booking_refunded", "clinic_booking", &bookingIDCopy, fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"refunded_cents":%d}`, bookingID, userID, refunded), now)
 		break
 	}
 	return CancelClinicBookingResult{
@@ -1335,7 +1336,7 @@ func (r *MemoryRepository) ConfirmPaidClinicBooking(_ context.Context, userID, f
 	r.walletTxByOp[operationID] = wtx.ID
 	r.nextWalletTxID++
 	bookingIDCopy := booking.ID
-	_ = r.enqueueOutboxLocked("booking_confirmed", "clinic_booking", &bookingIDCopy, fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"specialty_id":%d,"doctor_id":%d,"slot_id":%d}`, booking.ID, userID, specialtyID, doctorID, slotID), booking.CreatedAt)
+	_ = r.enqueueOutboxLocked(fmt.Sprintf("booking_confirmed:%d", booking.ID), "booking_confirmed", "clinic_booking", &bookingIDCopy, fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"specialty_id":%d,"doctor_id":%d,"slot_id":%d}`, booking.ID, userID, specialtyID, doctorID, slotID), booking.CreatedAt)
 
 	spec := r.specialties[specialtyID]
 	doc := r.doctors[doctorID]
@@ -1353,10 +1354,17 @@ func (r *MemoryRepository) ConfirmPaidClinicBooking(_ context.Context, userID, f
 func (r *MemoryRepository) EnqueueOutboxEvent(_ context.Context, event OutboxEvent) (OutboxEvent, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.enqueueOutboxLocked(event.EventType, event.AggregateType, event.AggregateID, event.PayloadJSON, event.AvailableAt), nil
+	if strings.TrimSpace(event.DedupeKey) != "" {
+		for _, existing := range r.outboxEvents {
+			if existing.DedupeKey == event.DedupeKey {
+				return existing, nil
+			}
+		}
+	}
+	return r.enqueueOutboxLocked(event.DedupeKey, event.EventType, event.AggregateType, event.AggregateID, event.PayloadJSON, event.AvailableAt), nil
 }
 
-func (r *MemoryRepository) enqueueOutboxLocked(eventType, aggregateType string, aggregateID *int64, payload string, availableAt time.Time) OutboxEvent {
+func (r *MemoryRepository) enqueueOutboxLocked(dedupeKey, eventType, aggregateType string, aggregateID *int64, payload string, availableAt time.Time) OutboxEvent {
 	now := time.Now().UTC()
 	if availableAt.IsZero() {
 		availableAt = now
@@ -1368,6 +1376,7 @@ func (r *MemoryRepository) enqueueOutboxLocked(eventType, aggregateType string, 
 	r.nextOutboxID++
 	ev := OutboxEvent{
 		ID:            id,
+		DedupeKey:     strings.TrimSpace(dedupeKey),
 		EventType:     strings.TrimSpace(eventType),
 		AggregateType: strings.TrimSpace(aggregateType),
 		AggregateID:   aggregateID,

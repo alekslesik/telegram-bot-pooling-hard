@@ -15,13 +15,15 @@ type bookingOutboxPayload struct {
 	SlotID    int64 `json:"slot_id"`
 }
 
-func NewBookingOutboxHandler(repo repository.BookingRepository) OutboxHandler {
+type ReminderNotifier func(ctx context.Context, userID int64, text string) error
+
+func NewBookingOutboxHandler(repo repository.BookingRepository, notifier ReminderNotifier) OutboxHandler {
 	return func(ctx context.Context, event repository.OutboxEvent) error {
 		switch event.EventType {
 		case "booking_confirmed":
 			return handleBookingConfirmedEvent(ctx, repo, event)
 		case "booking_reminder_due":
-			return handleBookingReminderDueEvent(ctx, repo, event)
+			return handleBookingReminderDueEvent(ctx, repo, notifier, event)
 		default:
 			return nil
 		}
@@ -51,6 +53,7 @@ func handleBookingConfirmedEvent(ctx context.Context, repo repository.BookingRep
 	}
 	bookingID := payload.BookingID
 	_, err = repo.EnqueueOutboxEvent(ctx, repository.OutboxEvent{
+		DedupeKey:     fmt.Sprintf("booking_reminder_due:%d", payload.BookingID),
 		EventType:     "booking_reminder_due",
 		AggregateType: "clinic_booking",
 		AggregateID:   &bookingID,
@@ -60,13 +63,23 @@ func handleBookingConfirmedEvent(ctx context.Context, repo repository.BookingRep
 	return err
 }
 
-func handleBookingReminderDueEvent(ctx context.Context, repo repository.BookingRepository, event repository.OutboxEvent) error {
+func handleBookingReminderDueEvent(ctx context.Context, repo repository.BookingRepository, notifier ReminderNotifier, event repository.OutboxEvent) error {
 	var payload bookingOutboxPayload
 	if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
 		return fmt.Errorf("decode booking_reminder_due payload: %w", err)
 	}
 	if payload.UserID == 0 {
 		return fmt.Errorf("invalid booking_reminder_due payload")
+	}
+	if notifier != nil {
+		slot, err := repo.GetDoctorSlotByID(ctx, payload.SlotID)
+		if err != nil {
+			return err
+		}
+		text := fmt.Sprintf("Напоминание: у вас запись скоро начнется.\nБронь ID: %d\nВремя: %s", payload.BookingID, slot.StartAt.Format("02.01.2006 15:04"))
+		if err := notifier(ctx, payload.UserID, text); err != nil {
+			return err
+		}
 	}
 	uid := payload.UserID
 	return repo.LogAnalyticsEvent(ctx, &uid, "booking_reminder_sent", event.PayloadJSON)
