@@ -159,10 +159,7 @@ func main() {
 	}
 
 	if outboxWorkerEnabled() {
-		outboxWorker := service.NewOutboxWorker(bookingRepo, func(ctx context.Context, event repository.OutboxEvent) error {
-			logger.Info("outbox processed", "id", event.ID, "event_type", event.EventType, "aggregate_type", event.AggregateType)
-			return nil
-		}, 20, 30*time.Second)
+		outboxWorker := service.NewOutboxWorker(bookingRepo, service.NewBookingOutboxHandler(bookingRepo), 20, 30*time.Second)
 		go outboxWorker.Run(workerCtx, 2*time.Second)
 		logger.Info("outbox worker enabled")
 	}
