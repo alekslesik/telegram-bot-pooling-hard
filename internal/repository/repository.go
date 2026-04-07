@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"strconv"
 	"sort"
 	"strings"
 	"sync"
@@ -105,6 +106,26 @@ type ClinicBookingView struct {
 	CreatedAt     time.Time
 }
 
+type CancelClinicBookingResult struct {
+	Booking       ClinicBookingView
+	RefundedCents int64
+	BalanceAfter  int64
+	RefundApplied bool
+}
+
+type WalletTransaction struct {
+	ID               int64
+	TelegramUserID   int64
+	OperationID      string
+	TxType           string
+	AmountCents      int64
+	BalanceBefore    int64
+	BalanceAfter     int64
+	RelatedBookingID *int64
+	MetadataJSON     string
+	CreatedAt        time.Time
+}
+
 type UserDocument struct {
 	ID             int64
 	TelegramUserID int64
@@ -168,7 +189,7 @@ type BookingRepository interface {
 	MarkDoctorSlotUnavailable(ctx context.Context, slotID int64) error
 	ListUserClinicBookings(ctx context.Context, userID int64, limit, offset int) ([]ClinicBookingView, error)
 	CountUserClinicBookings(ctx context.Context, userID int64) (int, error)
-	CancelClinicBooking(ctx context.Context, userID, bookingID int64) (ClinicBookingView, error)
+	CancelClinicBooking(ctx context.Context, userID, bookingID int64) (CancelClinicBookingResult, error)
 	SaveUserDocument(ctx context.Context, doc UserDocument) (UserDocument, error)
 	ListRecentUserDocuments(ctx context.Context, userID int64, limit int) ([]UserDocument, error)
 
@@ -198,7 +219,7 @@ type BookingRepository interface {
 	GrantReferralRewardsOnRegistration(ctx context.Context, userID, refereeBonusCents, referrerBonusCents int64) error
 	LogAnalyticsEvent(ctx context.Context, userID *int64, eventType, payloadJSON string) error
 	CountAnalyticsByEventSince(ctx context.Context, since time.Time) (map[string]int64, error)
-	ConfirmPaidClinicBooking(ctx context.Context, userID, feeCents, specialtyID, doctorID, slotID int64) (PaidBookingResult, error)
+	ConfirmPaidClinicBooking(ctx context.Context, userID, feeCents, specialtyID, doctorID, slotID int64, operationID string) (PaidBookingResult, error)
 }
 
 type MemoryRepository struct {
@@ -227,6 +248,9 @@ type MemoryRepository struct {
 	userProfiles    map[int64]UserProfile
 	analyticsEvents []memoryAnalyticsEvent
 	nextAnalyticID  int64
+	walletTx        map[int64]WalletTransaction
+	walletTxByOp    map[string]int64
+	nextWalletTxID  int64
 }
 
 type memoryAnalyticsEvent struct {
@@ -261,6 +285,9 @@ func NewMemoryRepository() *MemoryRepository {
 		userProfiles:    make(map[int64]UserProfile),
 		analyticsEvents: []memoryAnalyticsEvent{},
 		nextAnalyticID:  1,
+		walletTx:        make(map[int64]WalletTransaction),
+		walletTxByOp:    make(map[string]int64),
+		nextWalletTxID:  1,
 	}
 	r.seed()
 	return r
@@ -474,15 +501,17 @@ func (r *MemoryRepository) CountUserClinicBookings(_ context.Context, userID int
 	return count, nil
 }
 
-func (r *MemoryRepository) CancelClinicBooking(_ context.Context, userID, bookingID int64) (ClinicBookingView, error) {
+func (r *MemoryRepository) CancelClinicBooking(_ context.Context, userID, bookingID int64) (CancelClinicBookingResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	b, ok := r.clinicBooking[bookingID]
 	if !ok || b.TelegramUserID != userID {
-		return ClinicBookingView{}, ErrNotFound
+		return CancelClinicBookingResult{}, ErrNotFound
 	}
 	if b.Status == "cancelled" {
-		return r.toClinicBookingViewLocked(b), nil
+		return CancelClinicBookingResult{
+			Booking: r.toClinicBookingViewLocked(b),
+		}, nil
 	}
 	slot, ok := r.doctorSlots[b.DoctorSlotID]
 	if ok {
@@ -493,7 +522,53 @@ func (r *MemoryRepository) CancelClinicBooking(_ context.Context, userID, bookin
 	b.Status = "cancelled"
 	b.CancelledAt = &now
 	r.clinicBooking[bookingID] = b
-	return r.toClinicBookingViewLocked(b), nil
+
+	var refunded int64
+	var balanceAfter int64
+	for _, tx := range r.walletTx {
+		if tx.TxType != "debit" || tx.RelatedBookingID == nil || *tx.RelatedBookingID != bookingID {
+			continue
+		}
+		refundOp := "clinic_booking:refund:" + strconv.FormatInt(bookingID, 10)
+		if _, exists := r.walletTxByOp[refundOp]; exists {
+			break
+		}
+		profile, ok := r.userProfiles[userID]
+		if !ok {
+			break
+		}
+		refunded = -tx.AmountCents
+		if refunded <= 0 {
+			break
+		}
+		before := profile.BalanceCents
+		profile.BalanceCents += refunded
+		profile.UpdatedAt = now
+		balanceAfter = profile.BalanceCents
+		r.userProfiles[userID] = profile
+		wtx := WalletTransaction{
+			ID:               r.nextWalletTxID,
+			TelegramUserID:   userID,
+			OperationID:      refundOp,
+			TxType:           "refund",
+			AmountCents:      refunded,
+			BalanceBefore:    before,
+			BalanceAfter:     balanceAfter,
+			RelatedBookingID: &bookingID,
+			MetadataJSON:     "{}",
+			CreatedAt:        now,
+		}
+		r.walletTx[wtx.ID] = wtx
+		r.walletTxByOp[refundOp] = wtx.ID
+		r.nextWalletTxID++
+		break
+	}
+	return CancelClinicBookingResult{
+		Booking:       r.toClinicBookingViewLocked(b),
+		RefundedCents: refunded,
+		BalanceAfter:  balanceAfter,
+		RefundApplied: refunded > 0,
+	}, nil
 }
 
 func (r *MemoryRepository) SaveUserDocument(_ context.Context, doc UserDocument) (UserDocument, error) {
@@ -1134,9 +1209,30 @@ func (r *MemoryRepository) CountAnalyticsByEventSince(_ context.Context, since t
 	return out, nil
 }
 
-func (r *MemoryRepository) ConfirmPaidClinicBooking(_ context.Context, userID, feeCents, specialtyID, doctorID, slotID int64) (PaidBookingResult, error) {
+func (r *MemoryRepository) ConfirmPaidClinicBooking(_ context.Context, userID, feeCents, specialtyID, doctorID, slotID int64, operationID string) (PaidBookingResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if operationID != "" {
+		if txID, ok := r.walletTxByOp[operationID]; ok {
+			tx := r.walletTx[txID]
+			if tx.TxType == "debit" && tx.RelatedBookingID != nil {
+				if booking, ok := r.clinicBooking[*tx.RelatedBookingID]; ok {
+					spec := r.specialties[booking.SpecialtyID]
+					doc := r.doctors[booking.DoctorID]
+					slot := r.doctorSlots[booking.DoctorSlotID]
+					return PaidBookingResult{
+						BookingID:      booking.ID,
+						SpecialtyName:  spec.Name,
+						DoctorName:     doc.FullName,
+						SlotStart:      slot.StartAt,
+						BalanceAfter:   tx.BalanceAfter,
+						BookingCreated: booking.CreatedAt,
+					}, nil
+				}
+			}
+		}
+	}
 
 	p, ok := r.userProfiles[userID]
 	if !ok {
@@ -1172,6 +1268,7 @@ func (r *MemoryRepository) ConfirmPaidClinicBooking(_ context.Context, userID, f
 		return PaidBookingResult{}, ErrNotFound
 	}
 
+	before := p.BalanceCents
 	p.BalanceCents -= feeCents
 	p.UpdatedAt = time.Now().UTC()
 	r.userProfiles[userID] = p
@@ -1190,6 +1287,25 @@ func (r *MemoryRepository) ConfirmPaidClinicBooking(_ context.Context, userID, f
 	}
 	r.nextClinicID++
 	r.clinicBooking[booking.ID] = booking
+
+	if operationID == "" {
+		operationID = "clinic_booking:confirm:" + strconv.FormatInt(userID, 10) + ":" + strconv.FormatInt(slotID, 10)
+	}
+	wtx := WalletTransaction{
+		ID:               r.nextWalletTxID,
+		TelegramUserID:   userID,
+		OperationID:      operationID,
+		TxType:           "debit",
+		AmountCents:      -feeCents,
+		BalanceBefore:    before,
+		BalanceAfter:     p.BalanceCents,
+		RelatedBookingID: &booking.ID,
+		MetadataJSON:     "{}",
+		CreatedAt:        booking.CreatedAt,
+	}
+	r.walletTx[wtx.ID] = wtx
+	r.walletTxByOp[operationID] = wtx.ID
+	r.nextWalletTxID++
 
 	spec := r.specialties[specialtyID]
 	doc := r.doctors[doctorID]

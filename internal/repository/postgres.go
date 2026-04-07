@@ -394,10 +394,10 @@ func (r *PostgresRepository) CountUserClinicBookings(ctx context.Context, userID
 	return count, err
 }
 
-func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bookingID int64) (ClinicBookingView, error) {
+func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bookingID int64) (CancelClinicBookingResult, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return ClinicBookingView{}, err
+		return CancelClinicBookingResult{}, err
 	}
 	defer func() {
 		if err != nil {
@@ -413,24 +413,88 @@ func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bo
 		WHERE id = $1 AND telegram_user_id = $2
 		FOR UPDATE`, bookingID, userID).Scan(&slotID, &status)
 	if errors.Is(err, sql.ErrNoRows) {
-		return ClinicBookingView{}, ErrNotFound
+		return CancelClinicBookingResult{}, ErrNotFound
 	}
 	if err != nil {
-		return ClinicBookingView{}, err
+		return CancelClinicBookingResult{}, err
 	}
 
+	var refunded int64
+	var balanceAfter int64
+	var refundApplied bool
 	if status != "cancelled" {
 		if _, err = tx.ExecContext(ctx, `
 			UPDATE clinic_bookings
 			SET status = 'cancelled', cancelled_at = NOW()
 			WHERE id = $1`, bookingID); err != nil {
-			return ClinicBookingView{}, err
+			return CancelClinicBookingResult{}, err
 		}
 		if _, err = tx.ExecContext(ctx, `
 			UPDATE doctor_slots
 			SET is_available = TRUE
 			WHERE id = $1`, slotID); err != nil {
-			return ClinicBookingView{}, err
+			return CancelClinicBookingResult{}, err
+		}
+
+		var debitAmount int64
+		err = tx.QueryRowContext(ctx, `
+			SELECT amount_cents
+			FROM wallet_transactions
+			WHERE related_booking_id = $1
+			  AND tx_type = 'debit'
+			ORDER BY id DESC
+			LIMIT 1`, bookingID).Scan(&debitAmount)
+		if errors.Is(err, sql.ErrNoRows) {
+			err = nil
+		} else if err != nil {
+			return CancelClinicBookingResult{}, err
+		}
+		if debitAmount < 0 {
+			refunded = -debitAmount
+			refundOp := fmt.Sprintf("clinic_booking:refund:%d", bookingID)
+			var existing int64
+			err = tx.QueryRowContext(ctx, `
+				SELECT id
+				FROM wallet_transactions
+				WHERE operation_id = $1
+				LIMIT 1`, refundOp).Scan(&existing)
+			if errors.Is(err, sql.ErrNoRows) {
+				err = nil
+			} else if err != nil {
+				return CancelClinicBookingResult{}, err
+			}
+			if existing == 0 {
+				var before int64
+				err = tx.QueryRowContext(ctx, `
+					SELECT balance_cents
+					FROM user_profiles
+					WHERE telegram_user_id = $1
+					FOR UPDATE`, userID).Scan(&before)
+				if errors.Is(err, sql.ErrNoRows) {
+					return CancelClinicBookingResult{}, ErrNotFound
+				}
+				if err != nil {
+					return CancelClinicBookingResult{}, err
+				}
+				err = tx.QueryRowContext(ctx, `
+					UPDATE user_profiles
+					SET balance_cents = balance_cents + $2, updated_at = NOW()
+					WHERE telegram_user_id = $1
+					RETURNING balance_cents`, userID, refunded).Scan(&balanceAfter)
+				if err != nil {
+					return CancelClinicBookingResult{}, err
+				}
+				_, err = tx.ExecContext(ctx, `
+					INSERT INTO wallet_transactions (
+						telegram_user_id, operation_id, tx_type, amount_cents,
+						balance_before, balance_after, related_booking_id, metadata_json
+					) VALUES ($1, $2, 'refund', $3, $4, $5, $6, '{}'::jsonb)`,
+					userID, refundOp, refunded, before, balanceAfter, bookingID)
+				if err != nil {
+					return CancelClinicBookingResult{}, err
+				}
+				refundApplied = true
+			}
 		}
 	}
 
@@ -444,13 +508,18 @@ func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bo
 		WHERE cb.id = $1`, bookingID).
 		Scan(&item.ID, &item.SpecialtyName, &item.DoctorName, &item.StartAt, &item.Status, &item.CreatedAt)
 	if err != nil {
-		return ClinicBookingView{}, err
+		return CancelClinicBookingResult{}, err
 	}
 
 	if err = tx.Commit(); err != nil {
-		return ClinicBookingView{}, fmt.Errorf("commit cancel clinic booking tx: %w", err)
+		return CancelClinicBookingResult{}, fmt.Errorf("commit cancel clinic booking tx: %w", err)
 	}
-	return item, nil
+	return CancelClinicBookingResult{
+		Booking:       item,
+		RefundedCents: refunded,
+		BalanceAfter:  balanceAfter,
+		RefundApplied: refundApplied,
+	}, nil
 }
 
 func (r *PostgresRepository) SaveUserDocument(ctx context.Context, doc UserDocument) (UserDocument, error) {
@@ -894,7 +963,7 @@ func (r *PostgresRepository) CountAnalyticsByEventSince(ctx context.Context, sin
 	return out, rows.Err()
 }
 
-func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userID, feeCents, specialtyID, doctorID, slotID int64) (PaidBookingResult, error) {
+func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userID, feeCents, specialtyID, doctorID, slotID int64, operationID string) (PaidBookingResult, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return PaidBookingResult{}, err
@@ -904,6 +973,41 @@ func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userI
 			_ = tx.Rollback()
 		}
 	}()
+
+	if strings.TrimSpace(operationID) == "" {
+		operationID = fmt.Sprintf("clinic_booking:confirm:%d:%d", userID, slotID)
+	}
+	var existing WalletTransaction
+	err = tx.QueryRowContext(ctx, `
+		SELECT id, telegram_user_id, operation_id, tx_type, amount_cents, balance_before, balance_after,
+		       related_booking_id, metadata_json, created_at
+		FROM wallet_transactions
+		WHERE operation_id = $1
+		LIMIT 1`, operationID).
+		Scan(&existing.ID, &existing.TelegramUserID, &existing.OperationID, &existing.TxType, &existing.AmountCents,
+			&existing.BalanceBefore, &existing.BalanceAfter, &existing.RelatedBookingID, &existing.MetadataJSON, &existing.CreatedAt)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return PaidBookingResult{}, err
+	}
+	if err == nil && existing.TxType == "debit" && existing.RelatedBookingID != nil {
+		var out PaidBookingResult
+		err = tx.QueryRowContext(ctx, `
+			SELECT cb.id, s.name, d.full_name, ds.start_at, cb.created_at
+			FROM clinic_bookings cb
+			INNER JOIN specialties s ON s.id = cb.specialty_id
+			INNER JOIN doctors d ON d.id = cb.doctor_id
+			INNER JOIN doctor_slots ds ON ds.id = cb.doctor_slot_id
+			WHERE cb.id = $1`, *existing.RelatedBookingID).
+			Scan(&out.BookingID, &out.SpecialtyName, &out.DoctorName, &out.SlotStart, &out.BookingCreated)
+		if err != nil {
+			return PaidBookingResult{}, err
+		}
+		out.BalanceAfter = existing.BalanceAfter
+		if err = tx.Commit(); err != nil {
+			return PaidBookingResult{}, err
+		}
+		return out, nil
+	}
 
 	var balance int64
 	err = tx.QueryRowContext(ctx, `
@@ -921,6 +1025,7 @@ func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userI
 	}
 
 	var newBal int64
+	balanceBefore := balance
 	err = tx.QueryRowContext(ctx, `
 		UPDATE user_profiles
 		SET balance_cents = balance_cents - $2, updated_at = NOW()
@@ -951,6 +1056,16 @@ func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userI
 		VALUES ($1, $2, $3, $4, 'confirmed')
 		RETURNING id, created_at`,
 		userID, specialtyID, doctorID, slotID).Scan(&bookingID, &createdAt)
+	if err != nil {
+		return PaidBookingResult{}, err
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO wallet_transactions (
+			telegram_user_id, operation_id, tx_type, amount_cents,
+			balance_before, balance_after, related_booking_id, metadata_json
+		) VALUES ($1, $2, 'debit', $3, $4, $5, $6, '{}'::jsonb)`,
+		userID, operationID, -feeCents, balanceBefore, newBal, bookingID)
 	if err != nil {
 		return PaidBookingResult{}, err
 	}

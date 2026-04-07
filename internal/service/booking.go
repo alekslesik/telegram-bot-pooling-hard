@@ -723,7 +723,8 @@ func (s *BookingService) ConfirmClinicBooking(ctx context.Context, userID, speci
 		return "Этот слот уже недоступен. Выберите другое время.", nil
 	}
 
-	res, err := s.repo.ConfirmPaidClinicBooking(ctx, userID, ClinicBookingFeeCents, specialtyID, doctorID, slotID)
+	opID := fmt.Sprintf("clinic_booking:confirm:%d:%d", userID, slotID)
+	res, err := s.repo.ConfirmPaidClinicBooking(ctx, userID, ClinicBookingFeeCents, specialtyID, doctorID, slotID, opID)
 	if err != nil {
 		if errors.Is(err, repository.ErrInsufficientFunds) {
 			p, perr := s.repo.GetUserProfile(ctx, userID)
@@ -763,20 +764,24 @@ func (s *BookingService) ListClinicBookingsPage(ctx context.Context, userID int6
 }
 
 func (s *BookingService) CancelClinicBooking(ctx context.Context, userID, bookingID int64) (string, error) {
-	item, err := s.repo.CancelClinicBooking(ctx, userID, bookingID)
+	result, err := s.repo.CancelClinicBooking(ctx, userID, bookingID)
 	if err != nil {
 		if err == repository.ErrNotFound {
 			return "Запись не найдена.", nil
 		}
 		return "", err
 	}
-	return fmt.Sprintf(
+	msg := fmt.Sprintf(
 		"Запись отменена.\nID: %d\nНаправление: %s\nВрач: %s\nВремя: %s",
-		item.ID,
-		item.SpecialtyName,
-		item.DoctorName,
-		item.StartAt.Format("02.01.2006 15:04"),
-	), nil
+		result.Booking.ID,
+		result.Booking.SpecialtyName,
+		result.Booking.DoctorName,
+		result.Booking.StartAt.Format("02.01.2006 15:04"),
+	)
+	if result.RefundApplied {
+		msg += fmt.Sprintf("\nВозврат: +%d коп.\nБаланс после возврата: %d коп.", result.RefundedCents, result.BalanceAfter)
+	}
+	return msg, nil
 }
 
 func (s *BookingService) SaveUploadedDocument(ctx context.Context, userID int64, fileID, fileName, mimeType string, fileSize int) (string, error) {
