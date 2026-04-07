@@ -10,10 +10,11 @@ import (
 type OutboxHandler func(ctx context.Context, event repository.OutboxEvent) error
 
 type OutboxWorker struct {
-	repo       repository.BookingRepository
-	handler    OutboxHandler
-	batchSize  int
-	retryDelay time.Duration
+	repo        repository.BookingRepository
+	handler     OutboxHandler
+	batchSize   int
+	retryDelay  time.Duration
+	maxAttempts int
 }
 
 func NewOutboxWorker(repo repository.BookingRepository, handler OutboxHandler, batchSize int, retryDelay time.Duration) *OutboxWorker {
@@ -23,11 +24,13 @@ func NewOutboxWorker(repo repository.BookingRepository, handler OutboxHandler, b
 	if retryDelay <= 0 {
 		retryDelay = 30 * time.Second
 	}
+	maxAttempts := 5
 	return &OutboxWorker{
-		repo:       repo,
-		handler:    handler,
-		batchSize:  batchSize,
-		retryDelay: retryDelay,
+		repo:        repo,
+		handler:     handler,
+		batchSize:   batchSize,
+		retryDelay:  retryDelay,
+		maxAttempts: maxAttempts,
 	}
 }
 
@@ -63,6 +66,10 @@ func (w *OutboxWorker) Tick(ctx context.Context) error {
 			continue
 		}
 		if err := w.handler(ctx, item); err != nil {
+			if w.maxAttempts > 0 && item.Attempts >= w.maxAttempts {
+				_ = w.repo.MarkOutboxEventDead(ctx, item.ID, err.Error())
+				continue
+			}
 			_ = w.repo.MarkOutboxEventFailed(ctx, item.ID, err.Error(), time.Now().UTC().Add(w.retryDelay))
 			continue
 		}

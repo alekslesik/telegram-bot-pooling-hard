@@ -83,3 +83,34 @@ func TestOutboxWorkerTickRetriesOnFailure(t *testing.T) {
 		t.Fatalf("expected retry for event %d, got %+v", ev.ID, retry)
 	}
 }
+
+func TestOutboxWorkerTickMarksDeadAfterMaxAttempts(t *testing.T) {
+	repo := repository.NewMemoryRepository()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	_, err := repo.EnqueueOutboxEvent(ctx, repository.OutboxEvent{
+		EventType:     "booking_refunded",
+		AggregateType: "clinic_booking",
+		PayloadJSON:   `{"booking_id":3}`,
+		AvailableAt:   now,
+	})
+	if err != nil {
+		t.Fatalf("enqueue error: %v", err)
+	}
+
+	worker := NewOutboxWorker(repo, func(_ context.Context, _ repository.OutboxEvent) error {
+		return errors.New("permanent downstream failure")
+	}, 10, 20*time.Millisecond)
+	worker.maxAttempts = 1
+
+	if err := worker.Tick(ctx); err != nil {
+		t.Fatalf("tick error: %v", err)
+	}
+	counts, err := repo.CountOutboxByStatus(ctx)
+	if err != nil {
+		t.Fatalf("count status error: %v", err)
+	}
+	if counts["failed"] != 1 {
+		t.Fatalf("expected failed=1, got %+v", counts)
+	}
+}

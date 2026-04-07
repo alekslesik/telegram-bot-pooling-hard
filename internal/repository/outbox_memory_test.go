@@ -105,6 +105,9 @@ func TestMemoryRepository_OutboxNotFound(t *testing.T) {
 	if err := repo.MarkOutboxEventFailed(ctx, 999999, "x", time.Now().UTC()); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for mark failed, got %v", err)
 	}
+	if err := repo.MarkOutboxEventDead(ctx, 999999, "x"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for mark dead, got %v", err)
+	}
 }
 
 func TestMemoryRepository_OutboxDedupeKey(t *testing.T) {

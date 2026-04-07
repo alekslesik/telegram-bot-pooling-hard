@@ -1227,6 +1227,28 @@ func (r *PostgresRepository) MarkOutboxEventFailed(ctx context.Context, eventID 
 	return nil
 }
 
+func (r *PostgresRepository) MarkOutboxEventDead(ctx context.Context, eventID int64, lastError string) error {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE outbox_events
+		SET status = 'failed',
+		    locked_at = NULL,
+		    last_error = $2,
+		    processed_at = NOW(),
+		    updated_at = NOW()
+		WHERE id = $1`, eventID, strings.TrimSpace(lastError))
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (r *PostgresRepository) CountOutboxByStatus(ctx context.Context) (map[string]int64, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT status, COUNT(*)
@@ -1240,6 +1262,7 @@ func (r *PostgresRepository) CountOutboxByStatus(ctx context.Context) (map[strin
 		"pending":    0,
 		"processing": 0,
 		"done":       0,
+		"failed":     0,
 	}
 	for rows.Next() {
 		var status string
