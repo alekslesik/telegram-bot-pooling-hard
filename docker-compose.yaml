@@ -1,7 +1,7 @@
 # Local dev: Postgres + Redis + bot (build from Dockerfile).
 # On one VPS several bots run in parallel: set a unique COMPOSE_PROJECT_NAME per folder (see .env.example).
 
-name: ${COMPOSE_PROJECT_NAME:-telegram_bot_pooling_hard}
+name: ${COMPOSE_PROJECT_NAME:-telegram-bot-pooling-hard}
 
 services:
   redis:
