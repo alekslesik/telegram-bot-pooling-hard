@@ -1,14 +1,10 @@
-name: Deploy
-
-# Manual redeploy of an already-built image (e.g. after changing only .env on the server).
+name: Deploy (SSH) [deprecated]
 
 on:
-  workflow_dispatch:
-    inputs:
-      image_tag:
-        description: "GHCR image tag to deploy (e.g. v1.2.0 or latest)"
-        required: true
-        default: "latest"
+  workflow_dispatch: {}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
   contents: read
@@ -17,36 +13,16 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Copy compose file to VPS
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          source: "docker-compose.prod.yaml"
-          target: ${{ secrets.VPS_APP_PATH }}/
-
-      - name: Pull image and restart stack
+      - name: Deploy to VPS (manual)
         uses: appleboy/ssh-action@v1.2.0
-        env:
-          TAG: ${{ inputs.image_tag }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: TAG
           script: |
             set -euo pipefail
-            APP="${{ secrets.VPS_APP_PATH }}"
-            mkdir -p "$APP/secrets"
-            printf '%s' "${{ secrets.VPS_POSTGRES_PASSWORD }}" > "$APP/secrets/postgres_password"
-            chmod 600 "$APP/secrets/postgres_password"
-            if [ -n "${{ secrets.GHCR_READ_TOKEN }}" ] && [ -n "${{ secrets.GHCR_READ_USER }}" ]; then
-              echo "${{ secrets.GHCR_READ_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_READ_USER }}" --password-stdin
-            fi
-            cd "$APP"
-            export IMAGE_TAG="$TAG"
-            docker compose -f docker-compose.prod.yaml pull
-            docker compose -f docker-compose.prod.yaml up -d --remove-orphans
+            cd "${{ secrets.VPS_APP_PATH }}"
+            echo "${{ secrets.GHCR_READ_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_READ_USER }}" --password-stdin
+            echo "This workflow is deprecated. Use 'Release (build & push image)' for automated deploys."
+            docker image prune -f
+
