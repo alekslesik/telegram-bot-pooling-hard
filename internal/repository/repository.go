@@ -376,6 +376,9 @@ func (r *MemoryRepository) seed() {
 		r.doctorSlots[i+10] = DoctorSlot{ID: i + 10, DoctorID: 2, SpecialtyID: 2, StartAt: start.Add(2 * time.Hour), IsAvailable: true}
 		r.doctorSlots[i+20] = DoctorSlot{ID: i + 20, DoctorID: 3, SpecialtyID: 3, StartAt: start.Add(4 * time.Hour), IsAvailable: true}
 	}
+
+	// Default admin for local/in-memory runs.
+	r.admins[892122714] = struct{}{}
 }
 
 func (r *MemoryRepository) ListActiveServices(_ context.Context) ([]Service, error) {
