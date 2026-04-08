@@ -6,6 +6,8 @@ alwaysApply: true
 # Merge after green CI
 
 - Do **not** merge a pull request until **required** GitHub Actions checks are **green** (success).
+- Before opening a pull request, run `make preprod`.
+- After local runtime checks that start containers, run `make docker-compose-down`.
 - After opening or updating a PR, **wait** for CI to finish.
 - Merge only after explicit user confirmation/request.
 - Prefer GitHub CLI:
