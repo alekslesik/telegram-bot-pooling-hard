@@ -17,7 +17,8 @@ For each user task, always create a feature branch, commit with Conventional Com
 PR ownership preference:
 - Prepare branches/commits/PRs, but do **not** merge PRs unless the user explicitly asks.
 - In each PR body, include a concise changelog and a `Release notes draft` section.
-- If PR checks fail (CI/lint/format/tests/build), proactively fix issues in the same PR branch and re-run checks until green.
+- Before opening every PR, run `make preprod`.
+- After local runtime verification, always stop started containers with `make docker-compose-down`.
 
 Then apply execution scope by task type:
 
@@ -39,12 +40,14 @@ Run the full cycle:
 
 Do a lightweight cycle:
 
-1. Commit + push + PR link
-2. Wait for GitHub Actions CI to pass (green)
-3. Merge the PR only after explicit user confirmation/request
-4. Delete local feature branch
-5. Sync local `main`
-6. Skip local runtime checks and skip release tag by default
+1. Run `make preprod`
+2. Commit + push + PR link
+3. Wait for GitHub Actions CI to pass (green)
+4. Merge the PR only after explicit user confirmation/request
+5. Delete local feature branch
+6. Sync local `main`
+7. If any containers were started during checks, run `make docker-compose-down`
+8. Skip local runtime checks and skip release tag by default
 
 # Git Safety
 

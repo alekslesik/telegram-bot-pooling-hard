@@ -4,8 +4,8 @@ GO_FILES := ./...
 DOCKER_IMAGE := $(APP_NAME)
 ENV_FILE := .env
 VERSION ?=
-# Match go.mod / toolchain so linters are not built with an older Go (breaks staticcheck on new stdlib).
-GOTOOLCHAIN_LOCAL := $(shell go env GOVERSION 2>/dev/null)
+# Match go.mod / toolchain so checks are not run with an older Go stdlib.
+GOTOOLCHAIN_LOCAL := go1.26.2
 
 .DEFAULT_GOAL := help
 

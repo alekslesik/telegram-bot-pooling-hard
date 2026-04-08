@@ -16,7 +16,8 @@ Always use a feature branch, commit with Conventional Commits, push, and provide
 PR ownership preference:
 - The agent prepares branches/commits/PRs, but does **not** merge PRs unless the user explicitly asks.
 - Each PR body should include a clear changelog and a `Release notes draft` section for GitHub Releases.
-- If PR checks fail (CI, lint, format, tests, build), the agent should proactively fix issues in the same PR branch and re-run checks until green.
+- Before opening every PR, run `make preprod`.
+- After local runtime verification, always stop started containers using `make docker-compose-down`.
 
 Then choose the flow by change type:
 
@@ -36,11 +37,13 @@ Then choose the flow by change type:
 ### Docs/meta changes (no runtime impact)
 
 - Use lightweight flow:
+  - run `make preprod`
   - commit + push + PR
   - wait for GitHub Actions CI to pass (green)
   - merge the PR only after explicit user confirmation/request
   - delete local feature branch
   - sync local `main`
+- If any containers were started during checks, run `make docker-compose-down`.
 - Skip local runtime checks and skip release tag unless explicitly requested.
 
 ## Git Safety
