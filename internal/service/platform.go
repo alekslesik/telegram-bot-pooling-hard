@@ -44,7 +44,7 @@ func (s *BookingService) EnsureUserStart(ctx context.Context, userID int64, star
 }
 
 func (s *BookingService) LogAnalytics(ctx context.Context, userID *int64, eventType, payloadJSON string) error {
-	return s.repo.LogAnalyticsEvent(ctx, userID, eventType, payloadJSON)
+	return logAnalyticsWithEnvelope(ctx, s.repo, userID, eventType, payloadJSON, "bot")
 }
 
 func (s *BookingService) PreferredLang(ctx context.Context, userID int64) (string, error) {

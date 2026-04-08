@@ -82,5 +82,5 @@ func handleBookingReminderDueEvent(ctx context.Context, repo repository.BookingR
 		}
 	}
 	uid := payload.UserID
-	return repo.LogAnalyticsEvent(ctx, &uid, "booking_reminder_sent", event.PayloadJSON)
+	return logAnalyticsWithEnvelope(ctx, repo, &uid, "booking_reminder_sent", event.PayloadJSON, "outbox-worker")
 }
