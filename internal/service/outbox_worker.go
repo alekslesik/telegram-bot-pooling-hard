@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/repository"
@@ -67,13 +68,33 @@ func (w *OutboxWorker) Tick(ctx context.Context) error {
 		}
 		if err := w.handler(ctx, item); err != nil {
 			if w.maxAttempts > 0 && item.Attempts >= w.maxAttempts {
+				_ = w.repo.LogAnalyticsEvent(ctx, nil, "outbox_event_dead", `{"event_id":`+strconv.FormatInt(item.ID, 10)+`,"event_type":"`+item.EventType+`","attempts":`+strconv.Itoa(item.Attempts)+`}`)
 				_ = w.repo.MarkOutboxEventDead(ctx, item.ID, err.Error())
 				continue
 			}
-			_ = w.repo.MarkOutboxEventFailed(ctx, item.ID, err.Error(), time.Now().UTC().Add(w.retryDelay))
+			nextAttemptAt := time.Now().UTC().Add(w.retryBackoff(item.Attempts))
+			_ = w.repo.MarkOutboxEventFailed(ctx, item.ID, err.Error(), nextAttemptAt)
 			continue
 		}
 		_ = w.repo.MarkOutboxEventDone(ctx, item.ID)
 	}
 	return nil
+}
+
+func (w *OutboxWorker) retryBackoff(attempts int) time.Duration {
+	if attempts < 1 {
+		attempts = 1
+	}
+	delay := w.retryDelay
+	// Exponential backoff with safe cap to avoid unbounded retry gaps.
+	for i := 1; i < attempts; i++ {
+		if delay >= 10*time.Minute {
+			return 10 * time.Minute
+		}
+		delay *= 2
+	}
+	if delay > 10*time.Minute {
+		return 10 * time.Minute
+	}
+	return delay
 }
