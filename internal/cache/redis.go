@@ -52,3 +52,10 @@ func (r *Redis) Close() error {
 	}
 	return r.c.Close()
 }
+
+func (r *Redis) Ping(ctx context.Context) error {
+	if r == nil || r.c == nil {
+		return nil
+	}
+	return r.c.Ping(ctx).Err()
+}
