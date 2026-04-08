@@ -17,6 +17,7 @@ For each user task, always create a feature branch, commit with Conventional Com
 PR ownership preference:
 - Prepare branches/commits/PRs, but do **not** merge PRs unless the user explicitly asks.
 - In each PR body, include a concise changelog and a `Release notes draft` section.
+- If PR checks fail (CI/lint/format/tests/build), proactively fix issues in the same PR branch and re-run checks until green.
 
 Then apply execution scope by task type:
 
