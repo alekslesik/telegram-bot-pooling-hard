@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/bot"
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/cache"
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/dbconfig"
+	"github.com/alekslesik/telegram-bot-pooling-hard/internal/health"
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/logging"
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/repository"
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/service"
@@ -132,7 +134,7 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
-	bookingRepo, err := buildBookingRepository(logger)
+	bookingRepo, dbConn, err := buildBookingRepository(logger)
 	if err != nil {
 		log.Fatalf("failed to init booking repository: %v", err)
 	}
@@ -169,6 +171,17 @@ func main() {
 		logger.Info("outbox worker enabled")
 	}
 
+	var healthSrv *health.Server
+	if addr := healthAddrFromEnv(); addr != "" {
+		healthSrv = health.NewServer(addr, dbConn, redisCache, outboxWorkerEnabled())
+		go func() {
+			if err := healthSrv.Start(); err != nil && err != http.ErrServerClosed {
+				logger.Error("health server failed", "err", err)
+			}
+		}()
+		logger.Info("health endpoints enabled", "addr", addr)
+	}
+
 	logger.Info("bot started with long polling, press Ctrl+C to stop")
 
 	for {
@@ -179,6 +192,11 @@ func main() {
 		case sig := <-stop:
 			logger.Info("received signal, shutting down", "signal", sig.String())
 			workerCancel()
+			if healthSrv != nil {
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = healthSrv.Shutdown(shutdownCtx)
+				cancel()
+			}
 			return
 		}
 	}
@@ -189,23 +207,27 @@ func outboxWorkerEnabled() bool {
 	return raw == "" || raw == "1" || raw == "true" || raw == "yes" || raw == "on"
 }
 
-func buildBookingRepository(logger slogLogger) (repository.BookingRepository, error) {
+func buildBookingRepository(logger slogLogger) (repository.BookingRepository, *sql.DB, error) {
 	dsn, err := dbconfig.ResolveDSN()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if dsn == "" {
 		logger.Info("DB_DSN / DB_PASSWORD_FILE not set, using in-memory booking repository")
-		return repository.NewMemoryRepository(), nil
+		return repository.NewMemoryRepository(), nil, nil
 	}
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := db.Ping(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	logger.Info("postgres booking repository enabled")
-	return repository.NewPostgresRepository(db), nil
+	return repository.NewPostgresRepository(db), db, nil
+}
+
+func healthAddrFromEnv() string {
+	return strings.TrimSpace(os.Getenv("HTTP_HEALTH_ADDR"))
 }
