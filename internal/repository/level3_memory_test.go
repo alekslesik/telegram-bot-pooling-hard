@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestMemoryRepository_ConfirmPaidClinicBooking_Insufficient(t *testing.T) {
@@ -91,5 +92,89 @@ func TestMemoryRepository_CancelClinicBooking_RefundsOnce(t *testing.T) {
 	}
 	if res2.RefundApplied || res2.RefundedCents != 0 {
 		t.Fatalf("expected no second refund, got applied=%v refunded=%d", res2.RefundApplied, res2.RefundedCents)
+	}
+}
+
+func TestMemoryRepository_CancelClinicBooking_AfterStart_NoRefund(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	const userID int64 = 401
+
+	if _, err := repo.EnsureUserProfile(ctx, userID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Move seeded slot to the past so refund policy blocks refund.
+	repo.mu.Lock()
+	slot := repo.doctorSlots[1]
+	slot.StartAt = time.Now().UTC().Add(-30 * time.Minute)
+	repo.doctorSlots[1] = slot
+	repo.mu.Unlock()
+
+	p0, err := repo.GetUserProfile(ctx, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	paid, err := repo.ConfirmPaidClinicBooking(ctx, userID, 100, 1, 1, 1, "op-cancel-401")
+	if err != nil {
+		t.Fatalf("paid booking error: %v", err)
+	}
+
+	res, err := repo.CancelClinicBooking(ctx, userID, paid.BookingID)
+	if err != nil {
+		t.Fatalf("cancel error: %v", err)
+	}
+	if res.RefundApplied || res.RefundedCents != 0 {
+		t.Fatalf("expected no refund after slot start, got applied=%v refunded=%d", res.RefundApplied, res.RefundedCents)
+	}
+
+	p1, err := repo.GetUserProfile(ctx, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := p0.BalanceCents - 100
+	if p1.BalanceCents != want {
+		t.Fatalf("expected balance to stay debited at %d, got %d", want, p1.BalanceCents)
+	}
+}
+
+func TestMemoryRepository_WalletReadModel_UpdatedAfterDebitAndRefund(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	const userID int64 = 402
+
+	if _, err := repo.EnsureUserProfile(ctx, userID); err != nil {
+		t.Fatal(err)
+	}
+
+	paid, err := repo.ConfirmPaidClinicBooking(ctx, userID, 100, 1, 1, 1, "op-read-model-402")
+	if err != nil {
+		t.Fatalf("paid booking error: %v", err)
+	}
+
+	modelAfterDebit, err := repo.GetWalletBalanceReadModel(ctx, userID)
+	if err != nil {
+		t.Fatalf("get read model after debit error: %v", err)
+	}
+	if modelAfterDebit.BalanceCents != paid.BalanceAfter {
+		t.Fatalf("read-model balance mismatch after debit: got=%d want=%d", modelAfterDebit.BalanceCents, paid.BalanceAfter)
+	}
+	if modelAfterDebit.LastTxID == nil {
+		t.Fatal("expected last_tx_id after debit")
+	}
+
+	if _, err := repo.CancelClinicBooking(ctx, userID, paid.BookingID); err != nil {
+		t.Fatalf("cancel booking error: %v", err)
+	}
+	modelAfterRefund, err := repo.GetWalletBalanceReadModel(ctx, userID)
+	if err != nil {
+		t.Fatalf("get read model after refund error: %v", err)
+	}
+	if modelAfterRefund.BalanceCents <= modelAfterDebit.BalanceCents {
+		t.Fatalf("expected balance to increase after refund, got before=%d after=%d", modelAfterDebit.BalanceCents, modelAfterRefund.BalanceCents)
+	}
+	if modelAfterRefund.LastTxID == nil {
+		t.Fatal("expected last_tx_id after refund")
 	}
 }
