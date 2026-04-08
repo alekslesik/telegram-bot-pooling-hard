@@ -16,6 +16,7 @@ Always use a feature branch, commit with Conventional Commits, push, and provide
 PR ownership preference:
 - The agent prepares branches/commits/PRs, but does **not** merge PRs unless the user explicitly asks.
 - Each PR body should include a clear changelog and a `Release notes draft` section for GitHub Releases.
+- If PR checks fail (CI, lint, format, tests, build), the agent should proactively fix issues in the same PR branch and re-run checks until green.
 
 Then choose the flow by change type:
 
