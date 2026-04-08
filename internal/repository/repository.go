@@ -127,6 +127,13 @@ type WalletTransaction struct {
 	CreatedAt        time.Time
 }
 
+type WalletBalanceReadModel struct {
+	TelegramUserID int64
+	BalanceCents   int64
+	LastTxID       *int64
+	UpdatedAt      time.Time
+}
+
 type OutboxEvent struct {
 	ID            int64
 	DedupeKey     string
@@ -238,6 +245,8 @@ type BookingRepository interface {
 	LogAnalyticsEvent(ctx context.Context, userID *int64, eventType, payloadJSON string) error
 	CountAnalyticsByEventSince(ctx context.Context, since time.Time) (map[string]int64, error)
 	ConfirmPaidClinicBooking(ctx context.Context, userID, feeCents, specialtyID, doctorID, slotID int64, operationID string) (PaidBookingResult, error)
+	UpsertWalletBalanceReadModel(ctx context.Context, userID int64, balanceCents int64, lastTxID *int64) error
+	GetWalletBalanceReadModel(ctx context.Context, userID int64) (WalletBalanceReadModel, error)
 	EnqueueOutboxEvent(ctx context.Context, event OutboxEvent) (OutboxEvent, error)
 	ClaimDueOutboxEvents(ctx context.Context, limit int, now time.Time) ([]OutboxEvent, error)
 	MarkOutboxEventDone(ctx context.Context, eventID int64) error
@@ -275,6 +284,7 @@ type MemoryRepository struct {
 	walletTx        map[int64]WalletTransaction
 	walletTxByOp    map[string]int64
 	nextWalletTxID  int64
+	walletReadModel map[int64]WalletBalanceReadModel
 	outboxEvents    map[int64]OutboxEvent
 	nextOutboxID    int64
 }
@@ -314,6 +324,7 @@ func NewMemoryRepository() *MemoryRepository {
 		walletTx:        make(map[int64]WalletTransaction),
 		walletTxByOp:    make(map[string]int64),
 		nextWalletTxID:  1,
+		walletReadModel: make(map[int64]WalletBalanceReadModel),
 		outboxEvents:    make(map[int64]OutboxEvent),
 		nextOutboxID:    1,
 	}
@@ -545,6 +556,7 @@ func (r *MemoryRepository) CancelClinicBooking(_ context.Context, userID, bookin
 		}, nil
 	}
 	slot, ok := r.doctorSlots[b.DoctorSlotID]
+	slotStart := slot.StartAt
 	if ok {
 		slot.IsAvailable = true
 		r.doctorSlots[b.DoctorSlotID] = slot
@@ -558,44 +570,53 @@ func (r *MemoryRepository) CancelClinicBooking(_ context.Context, userID, bookin
 
 	var refunded int64
 	var balanceAfter int64
-	for _, tx := range r.walletTx {
-		if tx.TxType != "debit" || tx.RelatedBookingID == nil || *tx.RelatedBookingID != bookingID {
-			continue
-		}
-		refundOp := "clinic_booking:refund:" + strconv.FormatInt(bookingID, 10)
-		if _, exists := r.walletTxByOp[refundOp]; exists {
+	if now.Before(slotStart) {
+		for _, tx := range r.walletTx {
+			if tx.TxType != "debit" || tx.RelatedBookingID == nil || *tx.RelatedBookingID != bookingID {
+				continue
+			}
+			refundOp := "clinic_booking:refund:" + strconv.FormatInt(bookingID, 10)
+			if _, exists := r.walletTxByOp[refundOp]; exists {
+				break
+			}
+			profile, ok := r.userProfiles[userID]
+			if !ok {
+				break
+			}
+			refunded = -tx.AmountCents
+			if refunded <= 0 {
+				break
+			}
+			before := profile.BalanceCents
+			profile.BalanceCents += refunded
+			profile.UpdatedAt = now
+			balanceAfter = profile.BalanceCents
+			r.userProfiles[userID] = profile
+			wtx := WalletTransaction{
+				ID:               r.nextWalletTxID,
+				TelegramUserID:   userID,
+				OperationID:      refundOp,
+				TxType:           "refund",
+				AmountCents:      refunded,
+				BalanceBefore:    before,
+				BalanceAfter:     balanceAfter,
+				RelatedBookingID: &bookingID,
+				MetadataJSON:     "{}",
+				CreatedAt:        now,
+			}
+			r.walletTx[wtx.ID] = wtx
+			r.walletTxByOp[refundOp] = wtx.ID
+			r.nextWalletTxID++
+			wtxID := wtx.ID
+			r.walletReadModel[userID] = WalletBalanceReadModel{
+				TelegramUserID: userID,
+				BalanceCents:   balanceAfter,
+				LastTxID:       &wtxID,
+				UpdatedAt:      now,
+			}
+			_ = r.enqueueOutboxLocked(fmt.Sprintf("booking_refunded:%d", bookingID), "booking_refunded", "clinic_booking", &bookingIDCopy, fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"refunded_cents":%d}`, bookingID, userID, refunded), now)
 			break
 		}
-		profile, ok := r.userProfiles[userID]
-		if !ok {
-			break
-		}
-		refunded = -tx.AmountCents
-		if refunded <= 0 {
-			break
-		}
-		before := profile.BalanceCents
-		profile.BalanceCents += refunded
-		profile.UpdatedAt = now
-		balanceAfter = profile.BalanceCents
-		r.userProfiles[userID] = profile
-		wtx := WalletTransaction{
-			ID:               r.nextWalletTxID,
-			TelegramUserID:   userID,
-			OperationID:      refundOp,
-			TxType:           "refund",
-			AmountCents:      refunded,
-			BalanceBefore:    before,
-			BalanceAfter:     balanceAfter,
-			RelatedBookingID: &bookingID,
-			MetadataJSON:     "{}",
-			CreatedAt:        now,
-		}
-		r.walletTx[wtx.ID] = wtx
-		r.walletTxByOp[refundOp] = wtx.ID
-		r.nextWalletTxID++
-		_ = r.enqueueOutboxLocked(fmt.Sprintf("booking_refunded:%d", bookingID), "booking_refunded", "clinic_booking", &bookingIDCopy, fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"refunded_cents":%d}`, bookingID, userID, refunded), now)
-		break
 	}
 	return CancelClinicBookingResult{
 		Booking:       r.toClinicBookingViewLocked(b),
@@ -1340,6 +1361,13 @@ func (r *MemoryRepository) ConfirmPaidClinicBooking(_ context.Context, userID, f
 	r.walletTx[wtx.ID] = wtx
 	r.walletTxByOp[operationID] = wtx.ID
 	r.nextWalletTxID++
+	wtxID := wtx.ID
+	r.walletReadModel[userID] = WalletBalanceReadModel{
+		TelegramUserID: userID,
+		BalanceCents:   p.BalanceCents,
+		LastTxID:       &wtxID,
+		UpdatedAt:      booking.CreatedAt,
+	}
 	bookingIDCopy := booking.ID
 	_ = r.enqueueOutboxLocked(fmt.Sprintf("booking_confirmed:%d", booking.ID), "booking_confirmed", "clinic_booking", &bookingIDCopy, fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"specialty_id":%d,"doctor_id":%d,"slot_id":%d}`, booking.ID, userID, specialtyID, doctorID, slotID), booking.CreatedAt)
 
@@ -1494,4 +1522,26 @@ func (r *MemoryRepository) CountOutboxByStatus(_ context.Context) (map[string]in
 		out[ev.Status]++
 	}
 	return out, nil
+}
+
+func (r *MemoryRepository) UpsertWalletBalanceReadModel(_ context.Context, userID int64, balanceCents int64, lastTxID *int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.walletReadModel[userID] = WalletBalanceReadModel{
+		TelegramUserID: userID,
+		BalanceCents:   balanceCents,
+		LastTxID:       lastTxID,
+		UpdatedAt:      time.Now().UTC(),
+	}
+	return nil
+}
+
+func (r *MemoryRepository) GetWalletBalanceReadModel(_ context.Context, userID int64) (WalletBalanceReadModel, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	m, ok := r.walletReadModel[userID]
+	if !ok {
+		return WalletBalanceReadModel{}, ErrNotFound
+	}
+	return m, nil
 }

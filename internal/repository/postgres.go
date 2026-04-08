@@ -422,7 +422,19 @@ func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bo
 	var refunded int64
 	var balanceAfter int64
 	var refundApplied bool
+	var slotStart time.Time
 	if status != "cancelled" {
+		err = tx.QueryRowContext(ctx, `
+			SELECT start_at
+			FROM doctor_slots
+			WHERE id = $1
+			FOR UPDATE`, slotID).Scan(&slotStart)
+		if errors.Is(err, sql.ErrNoRows) {
+			return CancelClinicBookingResult{}, ErrNotFound
+		}
+		if err != nil {
+			return CancelClinicBookingResult{}, err
+		}
 		if _, err = tx.ExecContext(ctx, `
 			UPDATE clinic_bookings
 			SET status = 'cancelled', cancelled_at = NOW()
@@ -459,7 +471,7 @@ func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bo
 		} else if err != nil {
 			return CancelClinicBookingResult{}, err
 		}
-		if debitAmount < 0 {
+		if debitAmount < 0 && time.Now().UTC().Before(slotStart) {
 			refunded = -debitAmount
 			refundOp := fmt.Sprintf("clinic_booking:refund:%d", bookingID)
 			var existing int64
@@ -494,13 +506,18 @@ func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bo
 				if err != nil {
 					return CancelClinicBookingResult{}, err
 				}
-				_, err = tx.ExecContext(ctx, `
+				var refundTxID int64
+				err = tx.QueryRowContext(ctx, `
 					INSERT INTO wallet_transactions (
 						telegram_user_id, operation_id, tx_type, amount_cents,
 						balance_before, balance_after, related_booking_id, metadata_json
-					) VALUES ($1, $2, 'refund', $3, $4, $5, $6, '{}'::jsonb)`,
-					userID, refundOp, refunded, before, balanceAfter, bookingID)
+					) VALUES ($1, $2, 'refund', $3, $4, $5, $6, '{}'::jsonb)
+					RETURNING id`,
+					userID, refundOp, refunded, before, balanceAfter, bookingID).Scan(&refundTxID)
 				if err != nil {
+					return CancelClinicBookingResult{}, err
+				}
+				if err = r.upsertWalletBalanceReadModelTx(ctx, tx, userID, balanceAfter, &refundTxID); err != nil {
 					return CancelClinicBookingResult{}, err
 				}
 				if err = r.enqueueOutboxEventTx(ctx, tx, OutboxEvent{
@@ -1079,13 +1096,18 @@ func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userI
 		return PaidBookingResult{}, err
 	}
 
-	_, err = tx.ExecContext(ctx, `
+	var walletTxID int64
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO wallet_transactions (
 			telegram_user_id, operation_id, tx_type, amount_cents,
 			balance_before, balance_after, related_booking_id, metadata_json
-		) VALUES ($1, $2, 'debit', $3, $4, $5, $6, '{}'::jsonb)`,
-		userID, operationID, -feeCents, balanceBefore, newBal, bookingID)
+		) VALUES ($1, $2, 'debit', $3, $4, $5, $6, '{}'::jsonb)
+		RETURNING id`,
+		userID, operationID, -feeCents, balanceBefore, newBal, bookingID).Scan(&walletTxID)
 	if err != nil {
+		return PaidBookingResult{}, err
+	}
+	if err = r.upsertWalletBalanceReadModelTx(ctx, tx, userID, newBal, &walletTxID); err != nil {
 		return PaidBookingResult{}, err
 	}
 	bookingIDCopy := bookingID
@@ -1275,12 +1297,46 @@ func (r *PostgresRepository) CountOutboxByStatus(ctx context.Context) (map[strin
 	return out, rows.Err()
 }
 
+func (r *PostgresRepository) UpsertWalletBalanceReadModel(ctx context.Context, userID int64, balanceCents int64, lastTxID *int64) error {
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO wallet_balance_read_model (telegram_user_id, balance_cents, last_tx_id, updated_at)
+		VALUES ($1, $2, $3, NOW())
+		ON CONFLICT (telegram_user_id) DO UPDATE
+		SET balance_cents = EXCLUDED.balance_cents,
+		    last_tx_id = EXCLUDED.last_tx_id,
+		    updated_at = NOW()`, userID, balanceCents, lastTxID)
+	return err
+}
+
+func (r *PostgresRepository) GetWalletBalanceReadModel(ctx context.Context, userID int64) (WalletBalanceReadModel, error) {
+	var m WalletBalanceReadModel
+	err := r.db.QueryRowContext(ctx, `
+		SELECT telegram_user_id, balance_cents, last_tx_id, updated_at
+		FROM wallet_balance_read_model
+		WHERE telegram_user_id = $1`, userID).Scan(&m.TelegramUserID, &m.BalanceCents, &m.LastTxID, &m.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return WalletBalanceReadModel{}, ErrNotFound
+	}
+	return m, err
+}
+
 func (r *PostgresRepository) enqueueOutboxEventTx(ctx context.Context, tx *sql.Tx, event OutboxEvent) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO outbox_events (dedupe_key, event_type, aggregate_type, aggregate_id, payload_json, status, attempts, available_at)
 		VALUES ($1, $2, $3, $4, $5::jsonb, 'pending', 0, COALESCE($6, NOW()))
 		ON CONFLICT (dedupe_key) DO NOTHING`,
 		nullIfBlank(event.DedupeKey), event.EventType, event.AggregateType, event.AggregateID, coalesceJSON(event.PayloadJSON), nullIfZeroTime(event.AvailableAt))
+	return err
+}
+
+func (r *PostgresRepository) upsertWalletBalanceReadModelTx(ctx context.Context, tx *sql.Tx, userID int64, balanceCents int64, lastTxID *int64) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO wallet_balance_read_model (telegram_user_id, balance_cents, last_tx_id, updated_at)
+		VALUES ($1, $2, $3, NOW())
+		ON CONFLICT (telegram_user_id) DO UPDATE
+		SET balance_cents = EXCLUDED.balance_cents,
+		    last_tx_id = EXCLUDED.last_tx_id,
+		    updated_at = NOW()`, userID, balanceCents, lastTxID)
 	return err
 }
 
