@@ -44,8 +44,56 @@ type BookingService struct {
 	cache SpecialtyPageCache
 }
 
+type AdminCapabilities struct {
+	CanOpenPanel      bool
+	CanManageCatalog  bool
+	CanManageDaySlots bool
+	CanViewAnalytics  bool
+}
+
 func NewBookingService(repo repository.BookingRepository, cache SpecialtyPageCache) *BookingService {
 	return &BookingService{repo: repo, cache: cache}
+}
+
+func canManageCatalog(role repository.AdminRole) bool {
+	return role == repository.AdminRoleOwner || role == repository.AdminRoleAdmin
+}
+
+func canManageDaySlots(role repository.AdminRole) bool {
+	return role == repository.AdminRoleOwner || role == repository.AdminRoleAdmin || role == repository.AdminRoleOperator
+}
+
+func canViewAnalytics(role repository.AdminRole) bool {
+	return role == repository.AdminRoleOwner || role == repository.AdminRoleAdmin
+}
+
+func (s *BookingService) getAdminRole(ctx context.Context, userID int64) (repository.AdminRole, error) {
+	role, err := s.repo.GetAdminRole(ctx, userID)
+	if err == repository.ErrNotFound {
+		return "", nil
+	}
+	return role, err
+}
+
+func (s *BookingService) AdminCapabilities(ctx context.Context, userID int64) (AdminCapabilities, error) {
+	role, err := s.getAdminRole(ctx, userID)
+	if err != nil {
+		return AdminCapabilities{}, err
+	}
+	if role == "" {
+		return AdminCapabilities{}, nil
+	}
+	return AdminCapabilities{
+		CanOpenPanel:      true,
+		CanManageCatalog:  canManageCatalog(role),
+		CanManageDaySlots: canManageDaySlots(role),
+		CanViewAnalytics:  canViewAnalytics(role),
+	}, nil
+}
+
+func (s *BookingService) denyAdminAndReset(ctx context.Context, userID int64) (bool, string, error) {
+	_ = s.repo.DeleteConversationState(ctx, userID)
+	return true, "Нет доступа к админ-панели.", nil
 }
 
 func (s *BookingService) Start(ctx context.Context, userID int64) (string, error) {
@@ -120,22 +168,22 @@ func (s *BookingService) StartDocumentUpload(ctx context.Context, userID int64) 
 }
 
 func (s *BookingService) StartAdmin(ctx context.Context, userID int64) (bool, string, error) {
-	ok, err := s.repo.IsAdmin(ctx, userID)
+	caps, err := s.AdminCapabilities(ctx, userID)
 	if err != nil {
 		return false, "", err
 	}
-	if !ok {
+	if !caps.CanOpenPanel {
 		return false, "Нет доступа к админ-панели.", nil
 	}
 	return true, "Админ-панель: выберите действие.", nil
 }
 
 func (s *BookingService) StartAdminAddSpecialty(ctx context.Context, userID int64) (string, error) {
-	ok, err := s.repo.IsAdmin(ctx, userID)
+	caps, err := s.AdminCapabilities(ctx, userID)
 	if err != nil {
 		return "", err
 	}
-	if !ok {
+	if !caps.CanManageCatalog {
 		return "Нет доступа к админ-панели.", nil
 	}
 	if err := s.saveState(ctx, userID, StateAdminAddSpecialty, statePayload{}); err != nil {
@@ -145,11 +193,11 @@ func (s *BookingService) StartAdminAddSpecialty(ctx context.Context, userID int6
 }
 
 func (s *BookingService) StartAdminAddDoctor(ctx context.Context, userID int64) (string, error) {
-	ok, err := s.repo.IsAdmin(ctx, userID)
+	caps, err := s.AdminCapabilities(ctx, userID)
 	if err != nil {
 		return "", err
 	}
-	if !ok {
+	if !caps.CanManageCatalog {
 		return "Нет доступа к админ-панели.", nil
 	}
 	if err := s.saveState(ctx, userID, StateAdminAddDoctor, statePayload{}); err != nil {
@@ -159,11 +207,11 @@ func (s *BookingService) StartAdminAddDoctor(ctx context.Context, userID int64) 
 }
 
 func (s *BookingService) StartAdminLinkDoctorSpecialty(ctx context.Context, userID int64) (string, error) {
-	ok, err := s.repo.IsAdmin(ctx, userID)
+	caps, err := s.AdminCapabilities(ctx, userID)
 	if err != nil {
 		return "", err
 	}
-	if !ok {
+	if !caps.CanManageCatalog {
 		return "Нет доступа к админ-панели.", nil
 	}
 	if err := s.saveState(ctx, userID, StateAdminLinkDoctorSpecialty, statePayload{}); err != nil {
@@ -177,11 +225,11 @@ func (s *BookingService) StartAdminLinkDoctorSpecialty(ctx context.Context, user
 }
 
 func (s *BookingService) StartAdminGenerateSlots(ctx context.Context, userID int64) (string, error) {
-	ok, err := s.repo.IsAdmin(ctx, userID)
+	caps, err := s.AdminCapabilities(ctx, userID)
 	if err != nil {
 		return "", err
 	}
-	if !ok {
+	if !caps.CanManageCatalog {
 		return "Нет доступа к админ-панели.", nil
 	}
 	if err := s.saveState(ctx, userID, StateAdminGenerateSlots, statePayload{}); err != nil {
@@ -195,11 +243,11 @@ func (s *BookingService) StartAdminGenerateSlots(ctx context.Context, userID int
 }
 
 func (s *BookingService) StartAdminCloseDay(ctx context.Context, userID int64) (string, error) {
-	ok, err := s.repo.IsAdmin(ctx, userID)
+	caps, err := s.AdminCapabilities(ctx, userID)
 	if err != nil {
 		return "", err
 	}
-	if !ok {
+	if !caps.CanManageDaySlots {
 		return "Нет доступа к админ-панели.", nil
 	}
 	if err := s.saveState(ctx, userID, StateAdminCloseDay, statePayload{}); err != nil {
@@ -209,11 +257,11 @@ func (s *BookingService) StartAdminCloseDay(ctx context.Context, userID int64) (
 }
 
 func (s *BookingService) StartAdminOpenDay(ctx context.Context, userID int64) (string, error) {
-	ok, err := s.repo.IsAdmin(ctx, userID)
+	caps, err := s.AdminCapabilities(ctx, userID)
 	if err != nil {
 		return "", err
 	}
-	if !ok {
+	if !caps.CanManageDaySlots {
 		return "Нет доступа к админ-панели.", nil
 	}
 	if err := s.saveState(ctx, userID, StateAdminOpenDay, statePayload{}); err != nil {
@@ -223,11 +271,11 @@ func (s *BookingService) StartAdminOpenDay(ctx context.Context, userID int64) (s
 }
 
 func (s *BookingService) StartAdminDaySlots(ctx context.Context, userID int64) (string, error) {
-	ok, err := s.repo.IsAdmin(ctx, userID)
+	caps, err := s.AdminCapabilities(ctx, userID)
 	if err != nil {
 		return "", err
 	}
-	if !ok {
+	if !caps.CanManageDaySlots {
 		return "Нет доступа к админ-панели.", nil
 	}
 	if err := s.saveState(ctx, userID, StateAdminDaySlots, statePayload{}); err != nil {
@@ -237,6 +285,13 @@ func (s *BookingService) StartAdminDaySlots(ctx context.Context, userID int64) (
 }
 
 func (s *BookingService) handleAdminAddSpecialty(ctx context.Context, userID int64, text string) (bool, string, error) {
+	caps, err := s.AdminCapabilities(ctx, userID)
+	if err != nil {
+		return true, "", err
+	}
+	if !caps.CanManageCatalog {
+		return s.denyAdminAndReset(ctx, userID)
+	}
 	parts := strings.Split(strings.TrimSpace(text), "|")
 	if len(parts) != 2 {
 		return true, "Неверный формат. Используйте: Название|Порядок", nil
@@ -256,6 +311,13 @@ func (s *BookingService) handleAdminAddSpecialty(ctx context.Context, userID int
 }
 
 func (s *BookingService) handleAdminAddDoctor(ctx context.Context, userID int64, text string) (bool, string, error) {
+	caps, err := s.AdminCapabilities(ctx, userID)
+	if err != nil {
+		return true, "", err
+	}
+	if !caps.CanManageCatalog {
+		return s.denyAdminAndReset(ctx, userID)
+	}
 	name := strings.TrimSpace(text)
 	if len(name) < 3 {
 		return true, "Введите корректное ФИО врача.", nil
@@ -270,6 +332,13 @@ func (s *BookingService) handleAdminAddDoctor(ctx context.Context, userID int64,
 }
 
 func (s *BookingService) handleAdminLinkDoctorSpecialty(ctx context.Context, userID int64, text string) (bool, string, error) {
+	caps, err := s.AdminCapabilities(ctx, userID)
+	if err != nil {
+		return true, "", err
+	}
+	if !caps.CanManageCatalog {
+		return s.denyAdminAndReset(ctx, userID)
+	}
 	parts := strings.Split(strings.TrimSpace(text), "|")
 	if len(parts) != 2 {
 		return true, "Неверный формат. Используйте: doctor_id|specialty_id", nil
@@ -294,6 +363,13 @@ func (s *BookingService) handleAdminLinkDoctorSpecialty(ctx context.Context, use
 }
 
 func (s *BookingService) handleAdminGenerateSlots(ctx context.Context, userID int64, text string) (bool, string, error) {
+	caps, err := s.AdminCapabilities(ctx, userID)
+	if err != nil {
+		return true, "", err
+	}
+	if !caps.CanManageCatalog {
+		return s.denyAdminAndReset(ctx, userID)
+	}
 	parts := strings.Split(strings.TrimSpace(text), "|")
 	if len(parts) != 6 {
 		return true, "Неверный формат. Используйте: doctor_id|specialty_id|YYYY-MM-DD|09:00|18:00|30", nil
@@ -359,6 +435,13 @@ func parseAdminDayInput(raw string) (doctorID, specialtyID int64, date time.Time
 }
 
 func (s *BookingService) handleAdminCloseDay(ctx context.Context, userID int64, text string) (bool, string, error) {
+	caps, err := s.AdminCapabilities(ctx, userID)
+	if err != nil {
+		return true, "", err
+	}
+	if !caps.CanManageDaySlots {
+		return s.denyAdminAndReset(ctx, userID)
+	}
 	doctorID, specialtyID, date, err := parseAdminDayInput(text)
 	if err != nil {
 		return true, "Неверный формат. Используйте: doctor_id|specialty_id|YYYY-MM-DD", nil
@@ -373,6 +456,13 @@ func (s *BookingService) handleAdminCloseDay(ctx context.Context, userID int64, 
 }
 
 func (s *BookingService) handleAdminOpenDay(ctx context.Context, userID int64, text string) (bool, string, error) {
+	caps, err := s.AdminCapabilities(ctx, userID)
+	if err != nil {
+		return true, "", err
+	}
+	if !caps.CanManageDaySlots {
+		return s.denyAdminAndReset(ctx, userID)
+	}
 	doctorID, specialtyID, date, err := parseAdminDayInput(text)
 	if err != nil {
 		return true, "Неверный формат. Используйте: doctor_id|specialty_id|YYYY-MM-DD", nil
@@ -387,6 +477,13 @@ func (s *BookingService) handleAdminOpenDay(ctx context.Context, userID int64, t
 }
 
 func (s *BookingService) handleAdminDaySlots(ctx context.Context, userID int64, text string) (bool, string, error) {
+	caps, err := s.AdminCapabilities(ctx, userID)
+	if err != nil {
+		return true, "", err
+	}
+	if !caps.CanManageDaySlots {
+		return s.denyAdminAndReset(ctx, userID)
+	}
 	doctorID, specialtyID, date, err := parseAdminDayInput(text)
 	if err != nil {
 		return true, "Неверный формат. Используйте: doctor_id|specialty_id|YYYY-MM-DD", nil

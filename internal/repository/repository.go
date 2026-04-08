@@ -169,6 +169,14 @@ type AdminAuditLog struct {
 	CreatedAt   time.Time
 }
 
+type AdminRole string
+
+const (
+	AdminRoleOwner    AdminRole = "owner"
+	AdminRoleAdmin    AdminRole = "admin"
+	AdminRoleOperator AdminRole = "operator"
+)
+
 // UserProfile holds Level-3 account fields (balance, referrals, locale).
 type UserProfile struct {
 	TelegramUserID        int64
@@ -219,6 +227,7 @@ type BookingRepository interface {
 	ListRecentUserDocuments(ctx context.Context, userID int64, limit int) ([]UserDocument, error)
 
 	IsAdmin(ctx context.Context, userID int64) (bool, error)
+	GetAdminRole(ctx context.Context, userID int64) (AdminRole, error)
 	ListAllSpecialties(ctx context.Context) ([]Specialty, error)
 	ListAllDoctors(ctx context.Context) ([]Doctor, error)
 	CreateSpecialty(ctx context.Context, name string, sortOrder int) (Specialty, error)
@@ -274,7 +283,7 @@ type MemoryRepository struct {
 	nextClinicID  int64
 	nextDocID     int64
 
-	admins       map[int64]struct{}
+	admins       map[int64]AdminRole
 	adminLogs    []AdminAuditLog
 	nextAdminLog int64
 
@@ -315,7 +324,7 @@ func NewMemoryRepository() *MemoryRepository {
 		nextSlotID:      1,
 		nextClinicID:    1,
 		nextDocID:       1,
-		admins:          make(map[int64]struct{}),
+		admins:          make(map[int64]AdminRole),
 		adminLogs:       []AdminAuditLog{},
 		nextAdminLog:    1,
 		userProfiles:    make(map[int64]UserProfile),
@@ -389,7 +398,7 @@ func (r *MemoryRepository) seed() {
 	}
 
 	// Default admin for local/in-memory runs.
-	r.admins[892122714] = struct{}{}
+	r.admins[892122714] = AdminRoleAdmin
 }
 
 func (r *MemoryRepository) ListActiveServices(_ context.Context) ([]Service, error) {
@@ -659,6 +668,27 @@ func (r *MemoryRepository) IsAdmin(_ context.Context, userID int64) (bool, error
 	defer r.mu.RUnlock()
 	_, ok := r.admins[userID]
 	return ok, nil
+}
+
+func (r *MemoryRepository) GetAdminRole(_ context.Context, userID int64) (AdminRole, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	role, ok := r.admins[userID]
+	if !ok {
+		return "", ErrNotFound
+	}
+	return role, nil
+}
+
+func (r *MemoryRepository) SetAdminRole(userID int64, role AdminRole) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	role = AdminRole(strings.TrimSpace(string(role)))
+	if role == "" {
+		delete(r.admins, userID)
+		return
+	}
+	r.admins[userID] = role
 }
 
 func (r *MemoryRepository) ListAllSpecialties(_ context.Context) ([]Specialty, error) {

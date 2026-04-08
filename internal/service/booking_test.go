@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/i18n"
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/repository"
@@ -128,5 +129,61 @@ func TestBookingService_RegisteredClientSkipsRegistration(t *testing.T) {
 	}
 	if !strings.Contains(start, "Выберите направление") {
 		t.Fatalf("registered client should skip registration, got %q", start)
+	}
+}
+
+func TestBookingService_AdminCapabilities_ByRole(t *testing.T) {
+	repo := repository.NewMemoryRepository()
+	repo.EnsureUserProfile(context.Background(), 777)
+	repo.EnsureUserProfile(context.Background(), 888)
+	repo.EnsureUserProfile(context.Background(), 999)
+
+	repo.SetAdminRole(777, repository.AdminRoleOperator)
+	repo.SetAdminRole(888, repository.AdminRoleAdmin)
+
+	svc := NewBookingService(repo, nil)
+	ctx := context.Background()
+
+	opCaps, err := svc.AdminCapabilities(ctx, 777)
+	if err != nil {
+		t.Fatalf("operator caps error: %v", err)
+	}
+	if !opCaps.CanOpenPanel || !opCaps.CanManageDaySlots || opCaps.CanManageCatalog || opCaps.CanViewAnalytics {
+		t.Fatalf("unexpected operator caps: %+v", opCaps)
+	}
+
+	adminCaps, err := svc.AdminCapabilities(ctx, 888)
+	if err != nil {
+		t.Fatalf("admin caps error: %v", err)
+	}
+	if !adminCaps.CanOpenPanel || !adminCaps.CanManageDaySlots || !adminCaps.CanManageCatalog || !adminCaps.CanViewAnalytics {
+		t.Fatalf("unexpected admin caps: %+v", adminCaps)
+	}
+}
+
+func TestBookingService_AdminHandleText_DeniesOperatorForCatalogState(t *testing.T) {
+	repo := repository.NewMemoryRepository()
+	repo.SetAdminRole(5001, repository.AdminRoleOperator)
+	svc := NewBookingService(repo, nil)
+	ctx := context.Background()
+
+	if err := repo.SaveConversationState(ctx, repository.ConversationState{
+		TelegramUserID: 5001,
+		State:          StateAdminAddSpecialty,
+		PayloadJSON:    "{}",
+		UpdatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("save state error: %v", err)
+	}
+
+	handled, msg, err := svc.HandleText(ctx, 5001, "Кардиохирург|10")
+	if err != nil {
+		t.Fatalf("handle text error: %v", err)
+	}
+	if !handled {
+		t.Fatalf("expected handled=true")
+	}
+	if !strings.Contains(msg, "Нет доступа") {
+		t.Fatalf("expected access denied, got %q", msg)
 	}
 }

@@ -363,14 +363,22 @@ func (h Handlers) sendCommandReply(chatID int64, cmdName string, msg *tgbotapi.M
 		return
 	}
 	if h.Booking != nil && cmdName == "admin" {
-		ok, text, err := h.Booking.StartAdmin(context.Background(), telegramUserID(msg))
+		ctx := context.Background()
+		userID := telegramUserID(msg)
+		ok, text, err := h.Booking.StartAdmin(ctx, userID)
 		if err != nil {
 			h.Logger.Error("failed to open admin panel", "err", err)
 			text = "Не удалось открыть админ-панель."
 		}
 		reply := tgbotapi.NewMessage(chatID, text)
 		if ok {
-			reply.ReplyMarkup = h.adminKeyboard()
+			caps, capsErr := h.Booking.AdminCapabilities(ctx, userID)
+			if capsErr != nil {
+				h.Logger.Error("failed to load admin capabilities", "err", capsErr)
+				reply.ReplyMarkup = commandKeyboard()
+			} else {
+				reply.ReplyMarkup = h.adminKeyboard(caps)
+			}
 		} else {
 			reply.ReplyMarkup = commandKeyboard()
 		}
@@ -921,35 +929,49 @@ func (h Handlers) handleAdminCallback(q *tgbotapi.CallbackQuery) {
 	}
 }
 
-func (h Handlers) adminKeyboard() *tgbotapi.InlineKeyboardMarkup {
-	inline := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Добавить специализацию", "admin:addspec"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Добавить врача", "admin:adddoc"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Привязать врач-специализация", "admin:link"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Сгенерировать слоты на день", "admin:slots"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Закрыть день", "admin:closeday"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Открыть день", "admin:openday"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Слоты на день", "admin:dayslots"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📊 Аналитика (7 дн.)", "admin:analytics"),
-		),
+func (h Handlers) adminKeyboard(caps service.AdminCapabilities) *tgbotapi.InlineKeyboardMarkup {
+	rows := make([][]tgbotapi.InlineKeyboardButton, 0, 8)
+	if caps.CanManageCatalog {
+		rows = append(rows,
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Добавить специализацию", "admin:addspec"),
+			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Добавить врача", "admin:adddoc"),
+			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Привязать врач-специализация", "admin:link"),
+			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Сгенерировать слоты на день", "admin:slots"),
+			),
+		)
+	}
+	if caps.CanManageDaySlots {
+		rows = append(rows,
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Закрыть день", "admin:closeday"),
+			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Открыть день", "admin:openday"),
+			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Слоты на день", "admin:dayslots"),
+			),
+		)
+	}
+	if caps.CanViewAnalytics {
+		rows = append(rows,
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("📊 Аналитика (7 дн.)", "admin:analytics"),
+			),
+		)
+	}
+	rows = append(rows,
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("✖️ Закрыть", "admin:close"),
 		),
 	)
+	inline := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	return &inline
 }

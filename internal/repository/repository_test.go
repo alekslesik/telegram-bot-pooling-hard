@@ -185,3 +185,20 @@ func TestMemoryRepository_AdminDayTools_CloseOpenAndView(t *testing.T) {
 		}
 	}
 }
+
+func TestMemoryRepository_GetAdminRole(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+
+	role, err := repo.GetAdminRole(ctx, 892122714)
+	if err != nil {
+		t.Fatalf("expected admin role for seeded user, got error: %v", err)
+	}
+	if role != AdminRoleAdmin {
+		t.Fatalf("expected role %q, got %q", AdminRoleAdmin, role)
+	}
+
+	if _, err := repo.GetAdminRole(ctx, 42424242); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound for unknown admin role, got: %v", err)
+	}
+}
