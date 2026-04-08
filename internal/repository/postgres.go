@@ -6,17 +6,23 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lib/pq"
 )
 
 type PostgresRepository struct {
-	db *sql.DB
+	db               *sql.DB
+	outboxSchemaMu   sync.Mutex
+	outboxSchemaDone bool
 }
 
 func NewPostgresRepository(db *sql.DB) *PostgresRepository {
-	return &PostgresRepository{db: db}
+	r := &PostgresRepository{db: db}
+	// Best-effort startup bootstrap to avoid first-tick outbox relation errors on fresh DBs.
+	_ = r.ensureOutboxSchema(context.Background())
+	return r
 }
 
 func (r *PostgresRepository) ListActiveServices(ctx context.Context) ([]Service, error) {
@@ -395,6 +401,9 @@ func (r *PostgresRepository) CountUserClinicBookings(ctx context.Context, userID
 }
 
 func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bookingID int64) (CancelClinicBookingResult, error) {
+	if err := r.ensureOutboxSchema(ctx); err != nil {
+		return CancelClinicBookingResult{}, err
+	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return CancelClinicBookingResult{}, err
@@ -1000,6 +1009,9 @@ func (r *PostgresRepository) CountAnalyticsByEventSince(ctx context.Context, sin
 }
 
 func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userID, feeCents, specialtyID, doctorID, slotID int64, operationID string) (PaidBookingResult, error) {
+	if err := r.ensureOutboxSchema(ctx); err != nil {
+		return PaidBookingResult{}, err
+	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return PaidBookingResult{}, err
@@ -1145,14 +1157,23 @@ func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userI
 }
 
 func (r *PostgresRepository) EnqueueOutboxEvent(ctx context.Context, event OutboxEvent) (OutboxEvent, error) {
-	err := r.db.QueryRowContext(ctx, `
+	exec := func() error {
+		return r.db.QueryRowContext(ctx, `
 		INSERT INTO outbox_events (dedupe_key, event_type, aggregate_type, aggregate_id, payload_json, status, attempts, available_at)
 		VALUES ($1, $2, $3, $4, $5::jsonb, 'pending', 0, COALESCE($6, NOW()))
 		ON CONFLICT (dedupe_key) DO UPDATE
 		SET dedupe_key = EXCLUDED.dedupe_key
 		RETURNING id, dedupe_key, status, attempts, available_at, created_at, updated_at`,
-		nullIfBlank(event.DedupeKey), event.EventType, event.AggregateType, event.AggregateID, coalesceJSON(event.PayloadJSON), nullIfZeroTime(event.AvailableAt)).
-		Scan(&event.ID, &event.DedupeKey, &event.Status, &event.Attempts, &event.AvailableAt, &event.CreatedAt, &event.UpdatedAt)
+			nullIfBlank(event.DedupeKey), event.EventType, event.AggregateType, event.AggregateID, coalesceJSON(event.PayloadJSON), nullIfZeroTime(event.AvailableAt)).
+			Scan(&event.ID, &event.DedupeKey, &event.Status, &event.Attempts, &event.AvailableAt, &event.CreatedAt, &event.UpdatedAt)
+	}
+	err := exec()
+	if isUndefinedOutboxRelationError(err) {
+		if ensureErr := r.ensureOutboxSchema(ctx); ensureErr != nil {
+			return OutboxEvent{}, ensureErr
+		}
+		err = exec()
+	}
 	if err != nil {
 		return OutboxEvent{}, err
 	}
@@ -1167,7 +1188,8 @@ func (r *PostgresRepository) ClaimDueOutboxEvents(ctx context.Context, limit int
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	rows, err := r.db.QueryContext(ctx, `
+	query := func() (*sql.Rows, error) {
+		return r.db.QueryContext(ctx, `
 		WITH picked AS (
 			SELECT id
 			FROM outbox_events
@@ -1186,7 +1208,15 @@ func (r *PostgresRepository) ClaimDueOutboxEvents(ctx context.Context, limit int
 		WHERE o.id = picked.id
 		RETURNING o.id, o.dedupe_key, o.event_type, o.aggregate_type, o.aggregate_id, o.payload_json::text,
 		          o.status, o.attempts, o.available_at, o.locked_at, o.processed_at, o.last_error, o.created_at, o.updated_at`,
-		now, limit)
+			now, limit)
+	}
+	rows, err := query()
+	if isUndefinedOutboxRelationError(err) {
+		if ensureErr := r.ensureOutboxSchema(ctx); ensureErr != nil {
+			return nil, ensureErr
+		}
+		rows, err = query()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1276,6 +1306,15 @@ func (r *PostgresRepository) CountOutboxByStatus(ctx context.Context) (map[strin
 		SELECT status, COUNT(*)
 		FROM outbox_events
 		GROUP BY status`)
+	if isUndefinedOutboxRelationError(err) {
+		if ensureErr := r.ensureOutboxSchema(ctx); ensureErr != nil {
+			return nil, ensureErr
+		}
+		rows, err = r.db.QueryContext(ctx, `
+		SELECT status, COUNT(*)
+		FROM outbox_events
+		GROUP BY status`)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1359,4 +1398,56 @@ func nullIfBlank(raw string) any {
 		return nil
 	}
 	return raw
+}
+
+func isUndefinedOutboxRelationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var pqErr *pq.Error
+	if !errors.As(err, &pqErr) {
+		return false
+	}
+	if string(pqErr.Code) != "42P01" {
+		return false
+	}
+	msg := strings.ToLower(pqErr.Message)
+	return strings.Contains(msg, "outbox_events")
+}
+
+func outboxBootstrapSQL() string {
+	return `
+CREATE TABLE IF NOT EXISTS outbox_events (
+    id BIGSERIAL PRIMARY KEY,
+    dedupe_key TEXT UNIQUE,
+    event_type TEXT NOT NULL,
+    aggregate_type TEXT NOT NULL,
+    aggregate_id BIGINT,
+    payload_json JSONB NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending','processing','done','failed')) DEFAULT 'pending',
+    attempts INT NOT NULL DEFAULT 0,
+    available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    locked_at TIMESTAMPTZ,
+    processed_at TIMESTAMPTZ,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_outbox_pending_available
+    ON outbox_events (status, available_at, id);
+`
+}
+
+func (r *PostgresRepository) ensureOutboxSchema(ctx context.Context) error {
+	r.outboxSchemaMu.Lock()
+	defer r.outboxSchemaMu.Unlock()
+	if r.outboxSchemaDone {
+		return nil
+	}
+	if _, err := r.db.ExecContext(ctx, outboxBootstrapSQL()); err != nil {
+		return err
+	}
+	r.outboxSchemaDone = true
+	return nil
 }
