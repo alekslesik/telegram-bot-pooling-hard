@@ -609,6 +609,22 @@ func (r *PostgresRepository) IsAdmin(ctx context.Context, userID int64) (bool, e
 	return ok, err
 }
 
+func (r *PostgresRepository) GetAdminRole(ctx context.Context, userID int64) (AdminRole, error) {
+	var role string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT role
+		FROM admins
+		WHERE telegram_user_id = $1 AND is_active = TRUE
+		LIMIT 1`, userID).Scan(&role)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return AdminRole(strings.TrimSpace(role)), nil
+}
+
 func (r *PostgresRepository) ListAllSpecialties(ctx context.Context) ([]Specialty, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, name, sort_order, is_active

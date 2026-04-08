@@ -74,11 +74,11 @@ func (s *BookingService) AccountCabinet(ctx context.Context, userID int64) (bala
 }
 
 func (s *BookingService) AdminAnalyticsReport(ctx context.Context, adminUserID int64) (string, error) {
-	ok, err := s.repo.IsAdmin(ctx, adminUserID)
+	caps, err := s.AdminCapabilities(ctx, adminUserID)
 	if err != nil {
 		return "", err
 	}
-	if !ok {
+	if !caps.CanViewAnalytics {
 		return "", fmt.Errorf("not admin")
 	}
 	since := time.Now().UTC().Add(-7 * 24 * time.Hour)
