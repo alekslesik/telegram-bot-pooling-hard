@@ -90,11 +90,16 @@ func (s *BookingService) AdminAnalyticsReport(ctx context.Context, adminUserID i
 	if err != nil {
 		return "", err
 	}
+	walletMismatches, err := s.repo.CountWalletBalanceMismatches(ctx)
+	if err != nil {
+		return "", err
+	}
 	if len(counts) == 0 {
 		lines := []string{
 			fmt.Sprintf("- outbox_pending: %d", outbox["pending"]),
 			fmt.Sprintf("- outbox_processing: %d", outbox["processing"]),
 			fmt.Sprintf("- outbox_done: %d", outbox["done"]),
+			fmt.Sprintf("- wallet_balance_mismatches: %d", walletMismatches),
 		}
 		return strings.Join(lines, "\n"), nil
 	}
@@ -106,6 +111,7 @@ func (s *BookingService) AdminAnalyticsReport(ctx context.Context, adminUserID i
 		fmt.Sprintf("- outbox_pending: %d", outbox["pending"]),
 		fmt.Sprintf("- outbox_processing: %d", outbox["processing"]),
 		fmt.Sprintf("- outbox_done: %d", outbox["done"]),
+		fmt.Sprintf("- wallet_balance_mismatches: %d", walletMismatches),
 	)
 	return strings.Join(lines, "\n"), nil
 }

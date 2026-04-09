@@ -275,3 +275,50 @@ func TestMemoryRepository_CancelClinicBooking_UsesConfiguredPartialRefundPolicy(
 		t.Fatalf("expected configured partial refund amount 25, got %d", res.RefundedCents)
 	}
 }
+
+func TestMemoryRepositoryCountWalletBalanceMismatches(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+
+	const (
+		userConsistent  int64 = 7001
+		userMissingRM   int64 = 7002
+		userLedgerDrift int64 = 7003
+	)
+
+	if _, err := repo.EnsureUserProfile(ctx, userConsistent); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpsertWalletBalanceReadModel(ctx, userConsistent, 500, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := repo.EnsureUserProfile(ctx, userMissingRM); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := repo.EnsureUserProfile(ctx, userLedgerDrift); err != nil {
+		t.Fatal(err)
+	}
+	paid, err := repo.ConfirmPaidClinicBooking(ctx, userLedgerDrift, 100, 1, 1, 1, "op-drift-7003")
+	if err != nil {
+		t.Fatalf("paid booking error: %v", err)
+	}
+	if paid.BalanceAfter <= 0 {
+		t.Fatalf("unexpected balance after booking: %d", paid.BalanceAfter)
+	}
+
+	repo.mu.Lock()
+	p := repo.userProfiles[userLedgerDrift]
+	p.BalanceCents++
+	repo.userProfiles[userLedgerDrift] = p
+	repo.mu.Unlock()
+
+	got, err := repo.CountWalletBalanceMismatches(ctx)
+	if err != nil {
+		t.Fatalf("count mismatches error: %v", err)
+	}
+	if got != 2 {
+		t.Fatalf("expected 2 mismatches, got %d", got)
+	}
+}

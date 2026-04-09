@@ -264,6 +264,7 @@ type BookingRepository interface {
 	MarkOutboxEventFailed(ctx context.Context, eventID int64, lastError string, nextAttemptAt time.Time) error
 	MarkOutboxEventDead(ctx context.Context, eventID int64, lastError string) error
 	CountOutboxByStatus(ctx context.Context) (map[string]int64, error)
+	CountWalletBalanceMismatches(ctx context.Context) (int64, error)
 }
 
 type MemoryRepository struct {
@@ -1615,6 +1616,44 @@ func (r *MemoryRepository) CountOutboxByStatus(_ context.Context) (map[string]in
 		out[ev.Status]++
 	}
 	return out, nil
+}
+
+func (r *MemoryRepository) CountWalletBalanceMismatches(_ context.Context) (int64, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var mismatches int64
+	for userID, profile := range r.userProfiles {
+		model, ok := r.walletReadModel[userID]
+		if !ok || model.BalanceCents != profile.BalanceCents {
+			mismatches++
+			continue
+		}
+		ledgerBalance, hasLedger := r.latestWalletBalanceForUserLocked(userID)
+		if hasLedger && ledgerBalance != profile.BalanceCents {
+			mismatches++
+		}
+	}
+	return mismatches, nil
+}
+
+func (r *MemoryRepository) latestWalletBalanceForUserLocked(userID int64) (int64, bool) {
+	var (
+		latestID      int64
+		latestBalance int64
+		has           bool
+	)
+	for txID, tx := range r.walletTx {
+		if tx.TelegramUserID != userID {
+			continue
+		}
+		if !has || txID > latestID {
+			latestID = txID
+			latestBalance = tx.BalanceAfter
+			has = true
+		}
+	}
+	return latestBalance, has
 }
 
 func (r *MemoryRepository) UpsertWalletBalanceReadModel(_ context.Context, userID int64, balanceCents int64, lastTxID *int64) error {

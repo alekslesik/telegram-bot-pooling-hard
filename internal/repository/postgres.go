@@ -1373,6 +1373,27 @@ func (r *PostgresRepository) CountOutboxByStatus(ctx context.Context) (map[strin
 	return out, rows.Err()
 }
 
+func (r *PostgresRepository) CountWalletBalanceMismatches(ctx context.Context) (int64, error) {
+	var mismatches int64
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM user_profiles up
+		LEFT JOIN wallet_balance_read_model wrm
+		  ON wrm.telegram_user_id = up.telegram_user_id
+		LEFT JOIN LATERAL (
+			SELECT wt.balance_after
+			FROM wallet_transactions wt
+			WHERE wt.telegram_user_id = up.telegram_user_id
+			ORDER BY wt.id DESC
+			LIMIT 1
+		) last_tx ON TRUE
+		WHERE wrm.telegram_user_id IS NULL
+		   OR up.balance_cents <> wrm.balance_cents
+		   OR (last_tx.balance_after IS NOT NULL AND up.balance_cents <> last_tx.balance_after)
+	`).Scan(&mismatches)
+	return mismatches, err
+}
+
 func (r *PostgresRepository) UpsertWalletBalanceReadModel(ctx context.Context, userID int64, balanceCents int64, lastTxID *int64) error {
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO wallet_balance_read_model (telegram_user_id, balance_cents, last_tx_id, updated_at)
