@@ -108,10 +108,12 @@ type ClinicBookingView struct {
 }
 
 type CancelClinicBookingResult struct {
-	Booking       ClinicBookingView
-	RefundedCents int64
-	BalanceAfter  int64
-	RefundApplied bool
+	Booking               ClinicBookingView
+	RefundedCents         int64
+	BalanceAfter          int64
+	RefundApplied         bool
+	RefundIsPartial       bool
+	RefundBlockedByPolicy bool
 }
 
 type WalletTransaction struct {
@@ -304,6 +306,30 @@ type memoryAnalyticsEvent struct {
 	EventType string
 	Payload   string
 	CreatedAt time.Time
+}
+
+const (
+	refundPartialWindow = 24 * time.Hour
+	refundPercentBase   = int64(100)
+	refundPercentPart   = int64(50)
+)
+
+func calculateClinicBookingRefund(debitAmount int64, now, slotStart time.Time) (refundCents int64, isPartial bool, blockedByPolicy bool) {
+	if debitAmount >= 0 {
+		return 0, false, false
+	}
+	feeCents := -debitAmount
+	if !now.Before(slotStart) {
+		return 0, false, true
+	}
+	if slotStart.Sub(now) < refundPartialWindow {
+		refund := (feeCents*refundPercentPart + refundPercentBase - 1) / refundPercentBase
+		if refund >= feeCents {
+			return feeCents, false, false
+		}
+		return refund, true, false
+	}
+	return feeCents, false, false
 }
 
 func NewMemoryRepository() *MemoryRepository {
@@ -579,59 +605,61 @@ func (r *MemoryRepository) CancelClinicBooking(_ context.Context, userID, bookin
 
 	var refunded int64
 	var balanceAfter int64
-	if now.Before(slotStart) {
-		for _, tx := range r.walletTx {
-			if tx.TxType != "debit" || tx.RelatedBookingID == nil || *tx.RelatedBookingID != bookingID {
-				continue
-			}
-			refundOp := "clinic_booking:refund:" + strconv.FormatInt(bookingID, 10)
-			if _, exists := r.walletTxByOp[refundOp]; exists {
-				break
-			}
-			profile, ok := r.userProfiles[userID]
-			if !ok {
-				break
-			}
-			refunded = -tx.AmountCents
-			if refunded <= 0 {
-				break
-			}
-			before := profile.BalanceCents
-			profile.BalanceCents += refunded
-			profile.UpdatedAt = now
-			balanceAfter = profile.BalanceCents
-			r.userProfiles[userID] = profile
-			wtx := WalletTransaction{
-				ID:               r.nextWalletTxID,
-				TelegramUserID:   userID,
-				OperationID:      refundOp,
-				TxType:           "refund",
-				AmountCents:      refunded,
-				BalanceBefore:    before,
-				BalanceAfter:     balanceAfter,
-				RelatedBookingID: &bookingID,
-				MetadataJSON:     "{}",
-				CreatedAt:        now,
-			}
-			r.walletTx[wtx.ID] = wtx
-			r.walletTxByOp[refundOp] = wtx.ID
-			r.nextWalletTxID++
-			wtxID := wtx.ID
-			r.walletReadModel[userID] = WalletBalanceReadModel{
-				TelegramUserID: userID,
-				BalanceCents:   balanceAfter,
-				LastTxID:       &wtxID,
-				UpdatedAt:      now,
-			}
-			_ = r.enqueueOutboxLocked(fmt.Sprintf("booking_refunded:%d", bookingID), "booking_refunded", "clinic_booking", &bookingIDCopy, fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"refunded_cents":%d}`, bookingID, userID, refunded), now)
+	var refundIsPartial bool
+	var refundBlockedByPolicy bool
+	for _, tx := range r.walletTx {
+		if tx.TxType != "debit" || tx.RelatedBookingID == nil || *tx.RelatedBookingID != bookingID {
+			continue
+		}
+		refundOp := "clinic_booking:refund:" + strconv.FormatInt(bookingID, 10)
+		if _, exists := r.walletTxByOp[refundOp]; exists {
 			break
 		}
+		profile, ok := r.userProfiles[userID]
+		if !ok {
+			break
+		}
+		refunded, refundIsPartial, refundBlockedByPolicy = calculateClinicBookingRefund(tx.AmountCents, now, slotStart)
+		if refunded <= 0 {
+			break
+		}
+		before := profile.BalanceCents
+		profile.BalanceCents += refunded
+		profile.UpdatedAt = now
+		balanceAfter = profile.BalanceCents
+		r.userProfiles[userID] = profile
+		wtx := WalletTransaction{
+			ID:               r.nextWalletTxID,
+			TelegramUserID:   userID,
+			OperationID:      refundOp,
+			TxType:           "refund",
+			AmountCents:      refunded,
+			BalanceBefore:    before,
+			BalanceAfter:     balanceAfter,
+			RelatedBookingID: &bookingID,
+			MetadataJSON:     "{}",
+			CreatedAt:        now,
+		}
+		r.walletTx[wtx.ID] = wtx
+		r.walletTxByOp[refundOp] = wtx.ID
+		r.nextWalletTxID++
+		wtxID := wtx.ID
+		r.walletReadModel[userID] = WalletBalanceReadModel{
+			TelegramUserID: userID,
+			BalanceCents:   balanceAfter,
+			LastTxID:       &wtxID,
+			UpdatedAt:      now,
+		}
+		_ = r.enqueueOutboxLocked(fmt.Sprintf("booking_refunded:%d", bookingID), "booking_refunded", "clinic_booking", &bookingIDCopy, fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"refunded_cents":%d}`, bookingID, userID, refunded), now)
+		break
 	}
 	return CancelClinicBookingResult{
-		Booking:       r.toClinicBookingViewLocked(b),
-		RefundedCents: refunded,
-		BalanceAfter:  balanceAfter,
-		RefundApplied: refunded > 0,
+		Booking:               r.toClinicBookingViewLocked(b),
+		RefundedCents:         refunded,
+		BalanceAfter:          balanceAfter,
+		RefundApplied:         refunded > 0,
+		RefundIsPartial:       refundIsPartial && refunded > 0,
+		RefundBlockedByPolicy: refundBlockedByPolicy,
 	}, nil
 }
 

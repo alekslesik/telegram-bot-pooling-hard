@@ -128,6 +128,12 @@ func TestMemoryRepository_CancelClinicBooking_AfterStart_NoRefund(t *testing.T) 
 	if res.RefundApplied || res.RefundedCents != 0 {
 		t.Fatalf("expected no refund after slot start, got applied=%v refunded=%d", res.RefundApplied, res.RefundedCents)
 	}
+	if !res.RefundBlockedByPolicy {
+		t.Fatal("expected refund blocked by policy after slot start")
+	}
+	if res.RefundIsPartial {
+		t.Fatal("partial refund flag must be false when refund is blocked")
+	}
 
 	p1, err := repo.GetUserProfile(ctx, userID)
 	if err != nil {
@@ -136,6 +142,58 @@ func TestMemoryRepository_CancelClinicBooking_AfterStart_NoRefund(t *testing.T) 
 	want := p0.BalanceCents - 100
 	if p1.BalanceCents != want {
 		t.Fatalf("expected balance to stay debited at %d, got %d", want, p1.BalanceCents)
+	}
+}
+
+func TestMemoryRepository_CancelClinicBooking_BeforeStartPartialRefund(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	const userID int64 = 450
+
+	if _, err := repo.EnsureUserProfile(ctx, userID); err != nil {
+		t.Fatal(err)
+	}
+
+	repo.mu.Lock()
+	slot := repo.doctorSlots[1]
+	slot.StartAt = time.Now().UTC().Add(2 * time.Hour)
+	repo.doctorSlots[1] = slot
+	repo.mu.Unlock()
+
+	p0, err := repo.GetUserProfile(ctx, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	paid, err := repo.ConfirmPaidClinicBooking(ctx, userID, 100, 1, 1, 1, "op-cancel-partial-450")
+	if err != nil {
+		t.Fatalf("paid booking error: %v", err)
+	}
+
+	res, err := repo.CancelClinicBooking(ctx, userID, paid.BookingID)
+	if err != nil {
+		t.Fatalf("cancel error: %v", err)
+	}
+	if !res.RefundApplied {
+		t.Fatal("expected refund to be applied")
+	}
+	if !res.RefundIsPartial {
+		t.Fatal("expected partial refund flag")
+	}
+	if res.RefundBlockedByPolicy {
+		t.Fatal("policy blocked must be false for partial refund")
+	}
+	if res.RefundedCents != 50 {
+		t.Fatalf("expected 50 cents partial refund, got %d", res.RefundedCents)
+	}
+
+	p1, err := repo.GetUserProfile(ctx, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBalance := p0.BalanceCents - 50
+	if p1.BalanceCents != wantBalance {
+		t.Fatalf("unexpected balance after partial refund: want=%d got=%d", wantBalance, p1.BalanceCents)
 	}
 }
 

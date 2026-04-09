@@ -431,6 +431,8 @@ func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bo
 	var refunded int64
 	var balanceAfter int64
 	var refundApplied bool
+	var refundIsPartial bool
+	var refundBlockedByPolicy bool
 	var slotStart time.Time
 	if status != "cancelled" {
 		err = tx.QueryRowContext(ctx, `
@@ -480,65 +482,69 @@ func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bo
 		} else if err != nil {
 			return CancelClinicBookingResult{}, err
 		}
-		if debitAmount < 0 && time.Now().UTC().Before(slotStart) {
-			refunded = -debitAmount
-			refundOp := fmt.Sprintf("clinic_booking:refund:%d", bookingID)
-			var existing int64
-			err = tx.QueryRowContext(ctx, `
-				SELECT id
-				FROM wallet_transactions
-				WHERE operation_id = $1
-				LIMIT 1`, refundOp).Scan(&existing)
-			if errors.Is(err, sql.ErrNoRows) {
-				err = nil
-			} else if err != nil {
-				return CancelClinicBookingResult{}, err
-			}
-			if existing == 0 {
-				var before int64
+		if debitAmount < 0 {
+			refunded, refundIsPartial, refundBlockedByPolicy = calculateClinicBookingRefund(debitAmount, time.Now().UTC(), slotStart)
+			if refunded <= 0 {
+				// policy blocked or zero refund, nothing to write
+			} else {
+				refundOp := fmt.Sprintf("clinic_booking:refund:%d", bookingID)
+				var existing int64
 				err = tx.QueryRowContext(ctx, `
-					SELECT balance_cents
-					FROM user_profiles
-					WHERE telegram_user_id = $1
-					FOR UPDATE`, userID).Scan(&before)
+					SELECT id
+					FROM wallet_transactions
+					WHERE operation_id = $1
+					LIMIT 1`, refundOp).Scan(&existing)
 				if errors.Is(err, sql.ErrNoRows) {
-					return CancelClinicBookingResult{}, ErrNotFound
-				}
-				if err != nil {
+					err = nil
+				} else if err != nil {
 					return CancelClinicBookingResult{}, err
 				}
-				err = tx.QueryRowContext(ctx, `
-					UPDATE user_profiles
-					SET balance_cents = balance_cents + $2, updated_at = NOW()
-					WHERE telegram_user_id = $1
-					RETURNING balance_cents`, userID, refunded).Scan(&balanceAfter)
-				if err != nil {
-					return CancelClinicBookingResult{}, err
+				if existing == 0 {
+					var before int64
+					err = tx.QueryRowContext(ctx, `
+						SELECT balance_cents
+						FROM user_profiles
+						WHERE telegram_user_id = $1
+						FOR UPDATE`, userID).Scan(&before)
+					if errors.Is(err, sql.ErrNoRows) {
+						return CancelClinicBookingResult{}, ErrNotFound
+					}
+					if err != nil {
+						return CancelClinicBookingResult{}, err
+					}
+					err = tx.QueryRowContext(ctx, `
+						UPDATE user_profiles
+						SET balance_cents = balance_cents + $2, updated_at = NOW()
+						WHERE telegram_user_id = $1
+						RETURNING balance_cents`, userID, refunded).Scan(&balanceAfter)
+					if err != nil {
+						return CancelClinicBookingResult{}, err
+					}
+					var refundTxID int64
+					err = tx.QueryRowContext(ctx, `
+						INSERT INTO wallet_transactions (
+							telegram_user_id, operation_id, tx_type, amount_cents,
+							balance_before, balance_after, related_booking_id, metadata_json
+						) VALUES ($1, $2, 'refund', $3, $4, $5, $6, '{}'::jsonb)
+						RETURNING id`,
+						userID, refundOp, refunded, before, balanceAfter, bookingID).Scan(&refundTxID)
+					if err != nil {
+						return CancelClinicBookingResult{}, err
+					}
+					if err = r.upsertWalletBalanceReadModelTx(ctx, tx, userID, balanceAfter, &refundTxID); err != nil {
+						return CancelClinicBookingResult{}, err
+					}
+					if err = r.enqueueOutboxEventTx(ctx, tx, OutboxEvent{
+						DedupeKey:     fmt.Sprintf("booking_refunded:%d", bookingID),
+						EventType:     "booking_refunded",
+						AggregateType: "clinic_booking",
+						AggregateID:   &bookingIDCopy,
+						PayloadJSON:   fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"refunded_cents":%d}`, bookingID, userID, refunded),
+					}); err != nil {
+						return CancelClinicBookingResult{}, err
+					}
+					refundApplied = true
 				}
-				var refundTxID int64
-				err = tx.QueryRowContext(ctx, `
-					INSERT INTO wallet_transactions (
-						telegram_user_id, operation_id, tx_type, amount_cents,
-						balance_before, balance_after, related_booking_id, metadata_json
-					) VALUES ($1, $2, 'refund', $3, $4, $5, $6, '{}'::jsonb)
-					RETURNING id`,
-					userID, refundOp, refunded, before, balanceAfter, bookingID).Scan(&refundTxID)
-				if err != nil {
-					return CancelClinicBookingResult{}, err
-				}
-				if err = r.upsertWalletBalanceReadModelTx(ctx, tx, userID, balanceAfter, &refundTxID); err != nil {
-					return CancelClinicBookingResult{}, err
-				}
-				if err = r.enqueueOutboxEventTx(ctx, tx, OutboxEvent{
-					DedupeKey:     fmt.Sprintf("booking_refunded:%d", bookingID),
-					EventType:     "booking_refunded",
-					AggregateType: "clinic_booking",
-					AggregateID:   &bookingIDCopy,
-					PayloadJSON:   fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"refunded_cents":%d}`, bookingID, userID, refunded),
-				}); err != nil {
-					return CancelClinicBookingResult{}, err
-				}
-				refundApplied = true
 			}
 		}
 	}
@@ -560,10 +566,12 @@ func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bo
 		return CancelClinicBookingResult{}, fmt.Errorf("commit cancel clinic booking tx: %w", err)
 	}
 	return CancelClinicBookingResult{
-		Booking:       item,
-		RefundedCents: refunded,
-		BalanceAfter:  balanceAfter,
-		RefundApplied: refundApplied,
+		Booking:               item,
+		RefundedCents:         refunded,
+		BalanceAfter:          balanceAfter,
+		RefundApplied:         refundApplied,
+		RefundIsPartial:       refundIsPartial && refunded > 0,
+		RefundBlockedByPolicy: refundBlockedByPolicy,
 	}, nil
 }
 
