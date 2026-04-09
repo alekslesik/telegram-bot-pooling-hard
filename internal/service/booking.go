@@ -884,6 +884,9 @@ func (s *BookingService) CancelClinicBooking(ctx context.Context, userID, bookin
 	if result.RefundBlockedByPolicy {
 		msg += "\nВозврат недоступен: время приема уже началось."
 	}
+	if result.RefundBlockedByPolicy {
+		msg += "\nВозврат недоступен: время приема уже началось."
+	}
 	return msg, nil
 }
 

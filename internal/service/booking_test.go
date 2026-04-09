@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -235,5 +236,59 @@ func TestBookingService_AdminHandleText_DeniesOperatorForCatalogState(t *testing
 	}
 	if !strings.Contains(msg, "Нет доступа") {
 		t.Fatalf("expected access denied, got %q", msg)
+	}
+}
+
+func TestBookingService_CancelClinicBooking_PolicyBlockedMessage(t *testing.T) {
+	repo := repository.NewMemoryRepository()
+	svc := NewBookingService(repo, nil)
+	ctx := context.Background()
+	const userID int64 = 5601
+
+	if _, err := repo.EnsureUserProfile(ctx, userID); err != nil {
+		t.Fatal(err)
+	}
+
+	pastDay := time.Now().UTC().Add(-24 * time.Hour)
+	if _, err := repo.GenerateDoctorSlots(ctx, 1, 1, pastDay, 10*60, 11*60, 30); err != nil {
+		t.Fatalf("generate past slots error: %v", err)
+	}
+
+	slots, _, err := svc.ListSlotsPage(ctx, 1, 1, 0, 50)
+	if err != nil {
+		t.Fatalf("list slots error: %v", err)
+	}
+	if len(slots) == 0 {
+		t.Fatal("expected at least one slot")
+	}
+
+	paidText, err := svc.ConfirmClinicBooking(ctx, userID, 1, 1, slots[0].ID, i18n.Ru)
+	if err != nil {
+		t.Fatalf("paid booking error: %v", err)
+	}
+	if !strings.Contains(paidText, "Запись подтверждена") {
+		t.Fatalf("unexpected paid booking response: %q", paidText)
+	}
+
+	idPrefix := "ID: "
+	idx := strings.Index(paidText, idPrefix)
+	if idx < 0 {
+		t.Fatalf("failed to parse booking id from response: %q", paidText)
+	}
+	idParts := strings.Fields(paidText[idx+len(idPrefix):])
+	if len(idParts) == 0 {
+		t.Fatalf("failed to parse booking id tail from response: %q", paidText)
+	}
+	bookingID, err := strconv.ParseInt(idParts[0], 10, 64)
+	if err != nil {
+		t.Fatalf("parse booking id error: %v", err)
+	}
+
+	msg, err := svc.CancelClinicBooking(ctx, userID, bookingID)
+	if err != nil {
+		t.Fatalf("cancel clinic booking error: %v", err)
+	}
+	if !strings.Contains(msg, "Возврат недоступен") {
+		t.Fatalf("expected policy blocked message, got %q", msg)
 	}
 }
