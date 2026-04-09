@@ -111,6 +111,56 @@ func TestBookingService_Cancel(t *testing.T) {
 	}
 }
 
+func TestBookingService_CancelClinicBooking_PartialRefundMessage(t *testing.T) {
+	repo := repository.NewMemoryRepository()
+	svc := NewBookingService(repo, nil)
+	ctx := context.Background()
+	const userID int64 = 5610
+
+	if _, err := repo.EnsureUserProfile(ctx, userID); err != nil {
+		t.Fatal(err)
+	}
+
+	target := time.Now().UTC().Add(2 * time.Hour)
+	day := time.Date(target.Year(), target.Month(), target.Day(), 0, 0, 0, 0, time.UTC)
+	startMinute := target.Hour()*60 + target.Minute()
+	if _, err := repo.GenerateDoctorSlots(ctx, 1, 1, day, startMinute, startMinute+30, 30); err != nil {
+		t.Fatalf("generate near slots error: %v", err)
+	}
+
+	slots, _, err := svc.ListSlotsPage(ctx, 1, 1, 0, 100)
+	if err != nil {
+		t.Fatalf("list slots error: %v", err)
+	}
+	if len(slots) == 0 {
+		t.Fatal("expected at least one slot")
+	}
+	slotID := slots[0].ID
+	for _, slot := range slots {
+		diff := slot.StartAt.Sub(target)
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff <= 20*time.Minute {
+			slotID = slot.ID
+			break
+		}
+	}
+
+	paid, err := repo.ConfirmPaidClinicBooking(ctx, userID, 100, 1, 1, slotID, "op-service-cancel-partial-5610")
+	if err != nil {
+		t.Fatalf("paid booking error: %v", err)
+	}
+
+	msg, err := svc.CancelClinicBooking(ctx, userID, paid.BookingID)
+	if err != nil {
+		t.Fatalf("cancel clinic booking error: %v", err)
+	}
+	if !strings.Contains(msg, "частичный возврат") {
+		t.Fatalf("expected partial refund message, got %q", msg)
+	}
+}
+
 func TestBookingService_RegisteredClientSkipsRegistration(t *testing.T) {
 	repo := repository.NewMemoryRepository()
 	svc := NewBookingService(repo, nil)

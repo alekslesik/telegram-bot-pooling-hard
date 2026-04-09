@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -208,13 +210,21 @@ func outboxWorkerEnabled() bool {
 }
 
 func buildBookingRepository(logger slogLogger) (repository.BookingRepository, *sql.DB, error) {
+	refundPolicy, err := loadClinicRefundPolicyFromEnv()
+	if err != nil {
+		return nil, nil, err
+	}
 	dsn, err := dbconfig.ResolveDSN()
 	if err != nil {
 		return nil, nil, err
 	}
 	if dsn == "" {
 		logger.Info("DB_DSN / DB_PASSWORD_FILE not set, using in-memory booking repository")
-		return repository.NewMemoryRepository(), nil, nil
+		mem := repository.NewMemoryRepository()
+		if err := mem.SetClinicBookingRefundPolicy(refundPolicy); err != nil {
+			return nil, nil, err
+		}
+		return mem, nil, nil
 	}
 
 	db, err := sql.Open("postgres", dsn)
@@ -225,9 +235,39 @@ func buildBookingRepository(logger slogLogger) (repository.BookingRepository, *s
 		return nil, nil, err
 	}
 	logger.Info("postgres booking repository enabled")
-	return repository.NewPostgresRepository(db), db, nil
+	pg := repository.NewPostgresRepository(db)
+	if err := pg.SetClinicBookingRefundPolicy(refundPolicy); err != nil {
+		return nil, nil, err
+	}
+	return pg, db, nil
 }
 
 func healthAddrFromEnv() string {
 	return strings.TrimSpace(os.Getenv("HTTP_HEALTH_ADDR"))
+}
+
+func loadClinicRefundPolicyFromEnv() (repository.ClinicBookingRefundPolicy, error) {
+	policy := repository.DefaultClinicBookingRefundPolicy()
+
+	if raw := strings.TrimSpace(os.Getenv("CLINIC_REFUND_PARTIAL_WINDOW")); raw != "" {
+		v, err := time.ParseDuration(raw)
+		if err != nil {
+			return repository.ClinicBookingRefundPolicy{}, fmt.Errorf("parse CLINIC_REFUND_PARTIAL_WINDOW: %w", err)
+		}
+		policy.PartialWindow = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("CLINIC_REFUND_PARTIAL_PERCENT")); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return repository.ClinicBookingRefundPolicy{}, fmt.Errorf("parse CLINIC_REFUND_PARTIAL_PERCENT: %w", err)
+		}
+		policy.PartialPercent = v
+	}
+
+	normalized, err := repository.NormalizeClinicBookingRefundPolicy(policy)
+	if err != nil {
+		return repository.ClinicBookingRefundPolicy{}, err
+	}
+	return normalized, nil
 }

@@ -129,7 +129,10 @@ func TestMemoryRepository_CancelClinicBooking_AfterStart_NoRefund(t *testing.T) 
 		t.Fatalf("expected no refund after slot start, got applied=%v refunded=%d", res.RefundApplied, res.RefundedCents)
 	}
 	if !res.RefundBlockedByPolicy {
-		t.Fatal("expected refund to be marked as blocked by policy after slot start")
+		t.Fatal("expected refund blocked by policy after slot start")
+	}
+	if res.RefundIsPartial {
+		t.Fatal("partial refund flag must be false when refund is blocked")
 	}
 
 	p1, err := repo.GetUserProfile(ctx, userID)
@@ -139,6 +142,58 @@ func TestMemoryRepository_CancelClinicBooking_AfterStart_NoRefund(t *testing.T) 
 	want := p0.BalanceCents - 100
 	if p1.BalanceCents != want {
 		t.Fatalf("expected balance to stay debited at %d, got %d", want, p1.BalanceCents)
+	}
+}
+
+func TestMemoryRepository_CancelClinicBooking_BeforeStartPartialRefund(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	const userID int64 = 450
+
+	if _, err := repo.EnsureUserProfile(ctx, userID); err != nil {
+		t.Fatal(err)
+	}
+
+	repo.mu.Lock()
+	slot := repo.doctorSlots[1]
+	slot.StartAt = time.Now().UTC().Add(2 * time.Hour)
+	repo.doctorSlots[1] = slot
+	repo.mu.Unlock()
+
+	p0, err := repo.GetUserProfile(ctx, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	paid, err := repo.ConfirmPaidClinicBooking(ctx, userID, 100, 1, 1, 1, "op-cancel-partial-450")
+	if err != nil {
+		t.Fatalf("paid booking error: %v", err)
+	}
+
+	res, err := repo.CancelClinicBooking(ctx, userID, paid.BookingID)
+	if err != nil {
+		t.Fatalf("cancel error: %v", err)
+	}
+	if !res.RefundApplied {
+		t.Fatal("expected refund to be applied")
+	}
+	if !res.RefundIsPartial {
+		t.Fatal("expected partial refund flag")
+	}
+	if res.RefundBlockedByPolicy {
+		t.Fatal("policy blocked must be false for partial refund")
+	}
+	if res.RefundedCents != 50 {
+		t.Fatalf("expected 50 cents partial refund, got %d", res.RefundedCents)
+	}
+
+	p1, err := repo.GetUserProfile(ctx, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBalance := p0.BalanceCents - 50
+	if p1.BalanceCents != wantBalance {
+		t.Fatalf("unexpected balance after partial refund: want=%d got=%d", wantBalance, p1.BalanceCents)
 	}
 }
 
@@ -179,5 +234,91 @@ func TestMemoryRepository_WalletReadModel_UpdatedAfterDebitAndRefund(t *testing.
 	}
 	if modelAfterRefund.LastTxID == nil {
 		t.Fatal("expected last_tx_id after refund")
+	}
+}
+
+func TestMemoryRepository_CancelClinicBooking_UsesConfiguredPartialRefundPolicy(t *testing.T) {
+	repo := NewMemoryRepository()
+	if err := repo.SetClinicBookingRefundPolicy(ClinicBookingRefundPolicy{
+		PartialWindow:  2 * time.Hour,
+		PartialPercent: 25,
+	}); err != nil {
+		t.Fatalf("set refund policy: %v", err)
+	}
+
+	ctx := context.Background()
+	const userID int64 = 403
+
+	if _, err := repo.EnsureUserProfile(ctx, userID); err != nil {
+		t.Fatal(err)
+	}
+
+	repo.mu.Lock()
+	slot := repo.doctorSlots[1]
+	slot.StartAt = time.Now().UTC().Add(30 * time.Minute)
+	repo.doctorSlots[1] = slot
+	repo.mu.Unlock()
+
+	paid, err := repo.ConfirmPaidClinicBooking(ctx, userID, 100, 1, 1, 1, "op-policy-403")
+	if err != nil {
+		t.Fatalf("paid booking error: %v", err)
+	}
+
+	res, err := repo.CancelClinicBooking(ctx, userID, paid.BookingID)
+	if err != nil {
+		t.Fatalf("cancel error: %v", err)
+	}
+	if !res.RefundApplied || !res.RefundIsPartial {
+		t.Fatalf("expected configured partial refund, got applied=%v partial=%v", res.RefundApplied, res.RefundIsPartial)
+	}
+	if res.RefundedCents != 25 {
+		t.Fatalf("expected configured partial refund amount 25, got %d", res.RefundedCents)
+	}
+}
+
+func TestMemoryRepositoryCountWalletBalanceMismatches(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+
+	const (
+		userConsistent  int64 = 7001
+		userMissingRM   int64 = 7002
+		userLedgerDrift int64 = 7003
+	)
+
+	if _, err := repo.EnsureUserProfile(ctx, userConsistent); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpsertWalletBalanceReadModel(ctx, userConsistent, 500, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := repo.EnsureUserProfile(ctx, userMissingRM); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := repo.EnsureUserProfile(ctx, userLedgerDrift); err != nil {
+		t.Fatal(err)
+	}
+	paid, err := repo.ConfirmPaidClinicBooking(ctx, userLedgerDrift, 100, 1, 1, 1, "op-drift-7003")
+	if err != nil {
+		t.Fatalf("paid booking error: %v", err)
+	}
+	if paid.BalanceAfter <= 0 {
+		t.Fatalf("unexpected balance after booking: %d", paid.BalanceAfter)
+	}
+
+	repo.mu.Lock()
+	p := repo.userProfiles[userLedgerDrift]
+	p.BalanceCents++
+	repo.userProfiles[userLedgerDrift] = p
+	repo.mu.Unlock()
+
+	got, err := repo.CountWalletBalanceMismatches(ctx)
+	if err != nil {
+		t.Fatalf("count mismatches error: %v", err)
+	}
+	if got != 2 {
+		t.Fatalf("expected 2 mismatches, got %d", got)
 	}
 }

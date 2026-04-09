@@ -112,6 +112,7 @@ type CancelClinicBookingResult struct {
 	RefundedCents         int64
 	BalanceAfter          int64
 	RefundApplied         bool
+	RefundIsPartial       bool
 	RefundBlockedByPolicy bool
 }
 
@@ -263,6 +264,7 @@ type BookingRepository interface {
 	MarkOutboxEventFailed(ctx context.Context, eventID int64, lastError string, nextAttemptAt time.Time) error
 	MarkOutboxEventDead(ctx context.Context, eventID int64, lastError string) error
 	CountOutboxByStatus(ctx context.Context) (map[string]int64, error)
+	CountWalletBalanceMismatches(ctx context.Context) (int64, error)
 }
 
 type MemoryRepository struct {
@@ -288,15 +290,16 @@ type MemoryRepository struct {
 	adminLogs    []AdminAuditLog
 	nextAdminLog int64
 
-	userProfiles    map[int64]UserProfile
-	analyticsEvents []memoryAnalyticsEvent
-	nextAnalyticID  int64
-	walletTx        map[int64]WalletTransaction
-	walletTxByOp    map[string]int64
-	nextWalletTxID  int64
-	walletReadModel map[int64]WalletBalanceReadModel
-	outboxEvents    map[int64]OutboxEvent
-	nextOutboxID    int64
+	userProfiles       map[int64]UserProfile
+	analyticsEvents    []memoryAnalyticsEvent
+	nextAnalyticID     int64
+	walletTx           map[int64]WalletTransaction
+	walletTxByOp       map[string]int64
+	nextWalletTxID     int64
+	walletReadModel    map[int64]WalletBalanceReadModel
+	outboxEvents       map[int64]OutboxEvent
+	nextOutboxID       int64
+	clinicRefundPolicy ClinicBookingRefundPolicy
 }
 
 type memoryAnalyticsEvent struct {
@@ -307,39 +310,97 @@ type memoryAnalyticsEvent struct {
 	CreatedAt time.Time
 }
 
+const (
+	refundPartialWindow = 24 * time.Hour
+	refundPercentBase   = int64(100)
+	refundPercentPart   = int64(50)
+)
+
+type ClinicBookingRefundPolicy struct {
+	PartialWindow  time.Duration
+	PartialPercent int64
+}
+
+func DefaultClinicBookingRefundPolicy() ClinicBookingRefundPolicy {
+	return ClinicBookingRefundPolicy{
+		PartialWindow:  refundPartialWindow,
+		PartialPercent: refundPercentPart,
+	}
+}
+
+func NormalizeClinicBookingRefundPolicy(policy ClinicBookingRefundPolicy) (ClinicBookingRefundPolicy, error) {
+	if policy.PartialWindow <= 0 {
+		return ClinicBookingRefundPolicy{}, fmt.Errorf("partial window must be positive")
+	}
+	if policy.PartialPercent < 0 || policy.PartialPercent > refundPercentBase {
+		return ClinicBookingRefundPolicy{}, fmt.Errorf("partial percent must be within 0..100")
+	}
+	return policy, nil
+}
+
+func calculateClinicBookingRefund(policy ClinicBookingRefundPolicy, debitAmount int64, now, slotStart time.Time) (refundCents int64, isPartial bool, blockedByPolicy bool) {
+	if debitAmount >= 0 {
+		return 0, false, false
+	}
+	feeCents := -debitAmount
+	if !now.Before(slotStart) {
+		return 0, false, true
+	}
+	if slotStart.Sub(now) < policy.PartialWindow {
+		refund := (feeCents*policy.PartialPercent + refundPercentBase - 1) / refundPercentBase
+		if refund >= feeCents {
+			return feeCents, false, false
+		}
+		return refund, true, false
+	}
+	return feeCents, false, false
+}
+
 func NewMemoryRepository() *MemoryRepository {
 	r := &MemoryRepository{
-		services:        make(map[int64]Service),
-		slots:           make(map[int64]Slot),
-		bookings:        make(map[int64]Booking),
-		states:          make(map[int64]ConversationState),
-		clients:         make(map[int64]Client),
-		specialties:     make(map[int64]Specialty),
-		doctors:         make(map[int64]Doctor),
-		doctorLinks:     make(map[int64]map[int64]struct{}),
-		doctorSlots:     make(map[int64]DoctorSlot),
-		clinicBooking:   make(map[int64]ClinicBooking),
-		documents:       make(map[int64]UserDocument),
-		nextBookingID:   1,
-		nextServiceID:   1,
-		nextSlotID:      1,
-		nextClinicID:    1,
-		nextDocID:       1,
-		admins:          make(map[int64]AdminRole),
-		adminLogs:       []AdminAuditLog{},
-		nextAdminLog:    1,
-		userProfiles:    make(map[int64]UserProfile),
-		analyticsEvents: []memoryAnalyticsEvent{},
-		nextAnalyticID:  1,
-		walletTx:        make(map[int64]WalletTransaction),
-		walletTxByOp:    make(map[string]int64),
-		nextWalletTxID:  1,
-		walletReadModel: make(map[int64]WalletBalanceReadModel),
-		outboxEvents:    make(map[int64]OutboxEvent),
-		nextOutboxID:    1,
+		services:           make(map[int64]Service),
+		slots:              make(map[int64]Slot),
+		bookings:           make(map[int64]Booking),
+		states:             make(map[int64]ConversationState),
+		clients:            make(map[int64]Client),
+		specialties:        make(map[int64]Specialty),
+		doctors:            make(map[int64]Doctor),
+		doctorLinks:        make(map[int64]map[int64]struct{}),
+		doctorSlots:        make(map[int64]DoctorSlot),
+		clinicBooking:      make(map[int64]ClinicBooking),
+		documents:          make(map[int64]UserDocument),
+		nextBookingID:      1,
+		nextServiceID:      1,
+		nextSlotID:         1,
+		nextClinicID:       1,
+		nextDocID:          1,
+		admins:             make(map[int64]AdminRole),
+		adminLogs:          []AdminAuditLog{},
+		nextAdminLog:       1,
+		userProfiles:       make(map[int64]UserProfile),
+		analyticsEvents:    []memoryAnalyticsEvent{},
+		nextAnalyticID:     1,
+		walletTx:           make(map[int64]WalletTransaction),
+		walletTxByOp:       make(map[string]int64),
+		nextWalletTxID:     1,
+		walletReadModel:    make(map[int64]WalletBalanceReadModel),
+		outboxEvents:       make(map[int64]OutboxEvent),
+		nextOutboxID:       1,
+		clinicRefundPolicy: DefaultClinicBookingRefundPolicy(),
 	}
 	r.seed()
 	return r
+}
+
+func (r *MemoryRepository) SetClinicBookingRefundPolicy(policy ClinicBookingRefundPolicy) error {
+	normalized, err := NormalizeClinicBookingRefundPolicy(policy)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.clinicRefundPolicy = normalized
+	return nil
 }
 
 func randomReferralCode() (string, error) {
@@ -580,67 +641,60 @@ func (r *MemoryRepository) CancelClinicBooking(_ context.Context, userID, bookin
 
 	var refunded int64
 	var balanceAfter int64
+	var refundIsPartial bool
 	var refundBlockedByPolicy bool
-	if now.Before(slotStart) {
-		for _, tx := range r.walletTx {
-			if tx.TxType != "debit" || tx.RelatedBookingID == nil || *tx.RelatedBookingID != bookingID {
-				continue
-			}
-			refundOp := "clinic_booking:refund:" + strconv.FormatInt(bookingID, 10)
-			if _, exists := r.walletTxByOp[refundOp]; exists {
-				break
-			}
-			profile, ok := r.userProfiles[userID]
-			if !ok {
-				break
-			}
-			refunded = -tx.AmountCents
-			if refunded <= 0 {
-				break
-			}
-			before := profile.BalanceCents
-			profile.BalanceCents += refunded
-			profile.UpdatedAt = now
-			balanceAfter = profile.BalanceCents
-			r.userProfiles[userID] = profile
-			wtx := WalletTransaction{
-				ID:               r.nextWalletTxID,
-				TelegramUserID:   userID,
-				OperationID:      refundOp,
-				TxType:           "refund",
-				AmountCents:      refunded,
-				BalanceBefore:    before,
-				BalanceAfter:     balanceAfter,
-				RelatedBookingID: &bookingID,
-				MetadataJSON:     "{}",
-				CreatedAt:        now,
-			}
-			r.walletTx[wtx.ID] = wtx
-			r.walletTxByOp[refundOp] = wtx.ID
-			r.nextWalletTxID++
-			wtxID := wtx.ID
-			r.walletReadModel[userID] = WalletBalanceReadModel{
-				TelegramUserID: userID,
-				BalanceCents:   balanceAfter,
-				LastTxID:       &wtxID,
-				UpdatedAt:      now,
-			}
-			_ = r.enqueueOutboxLocked(fmt.Sprintf("booking_refunded:%d", bookingID), "booking_refunded", "clinic_booking", &bookingIDCopy, fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"refunded_cents":%d}`, bookingID, userID, refunded), now)
+	for _, tx := range r.walletTx {
+		if tx.TxType != "debit" || tx.RelatedBookingID == nil || *tx.RelatedBookingID != bookingID {
+			continue
+		}
+		refundOp := "clinic_booking:refund:" + strconv.FormatInt(bookingID, 10)
+		if _, exists := r.walletTxByOp[refundOp]; exists {
 			break
 		}
-	} else {
-		for _, tx := range r.walletTx {
-			if tx.TxType == "debit" && tx.RelatedBookingID != nil && *tx.RelatedBookingID == bookingID && tx.AmountCents < 0 {
-				refundBlockedByPolicy = true
-				break
-			}
+		profile, ok := r.userProfiles[userID]
+		if !ok {
+			break
 		}
+		refunded, refundIsPartial, refundBlockedByPolicy = calculateClinicBookingRefund(r.clinicRefundPolicy, tx.AmountCents, now, slotStart)
+		if refunded <= 0 {
+			break
+		}
+		before := profile.BalanceCents
+		profile.BalanceCents += refunded
+		profile.UpdatedAt = now
+		balanceAfter = profile.BalanceCents
+		r.userProfiles[userID] = profile
+		wtx := WalletTransaction{
+			ID:               r.nextWalletTxID,
+			TelegramUserID:   userID,
+			OperationID:      refundOp,
+			TxType:           "refund",
+			AmountCents:      refunded,
+			BalanceBefore:    before,
+			BalanceAfter:     balanceAfter,
+			RelatedBookingID: &bookingID,
+			MetadataJSON:     "{}",
+			CreatedAt:        now,
+		}
+		r.walletTx[wtx.ID] = wtx
+		r.walletTxByOp[refundOp] = wtx.ID
+		r.nextWalletTxID++
+		wtxID := wtx.ID
+		r.walletReadModel[userID] = WalletBalanceReadModel{
+			TelegramUserID: userID,
+			BalanceCents:   balanceAfter,
+			LastTxID:       &wtxID,
+			UpdatedAt:      now,
+		}
+		_ = r.enqueueOutboxLocked(fmt.Sprintf("booking_refunded:%d", bookingID), "booking_refunded", "clinic_booking", &bookingIDCopy, fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"refunded_cents":%d}`, bookingID, userID, refunded), now)
+		break
 	}
 	return CancelClinicBookingResult{
 		Booking:               r.toClinicBookingViewLocked(b),
 		RefundedCents:         refunded,
 		BalanceAfter:          balanceAfter,
 		RefundApplied:         refunded > 0,
+		RefundIsPartial:       refundIsPartial && refunded > 0,
 		RefundBlockedByPolicy: refundBlockedByPolicy,
 	}, nil
 }
@@ -1562,6 +1616,44 @@ func (r *MemoryRepository) CountOutboxByStatus(_ context.Context) (map[string]in
 		out[ev.Status]++
 	}
 	return out, nil
+}
+
+func (r *MemoryRepository) CountWalletBalanceMismatches(_ context.Context) (int64, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var mismatches int64
+	for userID, profile := range r.userProfiles {
+		model, ok := r.walletReadModel[userID]
+		if !ok || model.BalanceCents != profile.BalanceCents {
+			mismatches++
+			continue
+		}
+		ledgerBalance, hasLedger := r.latestWalletBalanceForUserLocked(userID)
+		if hasLedger && ledgerBalance != profile.BalanceCents {
+			mismatches++
+		}
+	}
+	return mismatches, nil
+}
+
+func (r *MemoryRepository) latestWalletBalanceForUserLocked(userID int64) (int64, bool) {
+	var (
+		latestID      int64
+		latestBalance int64
+		has           bool
+	)
+	for txID, tx := range r.walletTx {
+		if tx.TelegramUserID != userID {
+			continue
+		}
+		if !has || txID > latestID {
+			latestID = txID
+			latestBalance = tx.BalanceAfter
+			has = true
+		}
+	}
+	return latestBalance, has
 }
 
 func (r *MemoryRepository) UpsertWalletBalanceReadModel(_ context.Context, userID int64, balanceCents int64, lastTxID *int64) error {

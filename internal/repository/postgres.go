@@ -13,16 +13,29 @@ import (
 )
 
 type PostgresRepository struct {
-	db               *sql.DB
-	outboxSchemaMu   sync.Mutex
-	outboxSchemaDone bool
+	db                 *sql.DB
+	outboxSchemaMu     sync.Mutex
+	outboxSchemaDone   bool
+	clinicRefundPolicy ClinicBookingRefundPolicy
 }
 
 func NewPostgresRepository(db *sql.DB) *PostgresRepository {
-	r := &PostgresRepository{db: db}
+	r := &PostgresRepository{
+		db:                 db,
+		clinicRefundPolicy: DefaultClinicBookingRefundPolicy(),
+	}
 	// Best-effort startup bootstrap to avoid first-tick outbox relation errors on fresh DBs.
 	_ = r.ensureOutboxSchema(context.Background())
 	return r
+}
+
+func (r *PostgresRepository) SetClinicBookingRefundPolicy(policy ClinicBookingRefundPolicy) error {
+	normalized, err := NormalizeClinicBookingRefundPolicy(policy)
+	if err != nil {
+		return err
+	}
+	r.clinicRefundPolicy = normalized
+	return nil
 }
 
 func (r *PostgresRepository) ListActiveServices(ctx context.Context) ([]Service, error) {
@@ -431,6 +444,7 @@ func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bo
 	var refunded int64
 	var balanceAfter int64
 	var refundApplied bool
+	var refundIsPartial bool
 	var refundBlockedByPolicy bool
 	var slotStart time.Time
 	if status != "cancelled" {
@@ -482,10 +496,10 @@ func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bo
 			return CancelClinicBookingResult{}, err
 		}
 		if debitAmount < 0 {
-			if !time.Now().UTC().Before(slotStart) {
-				refundBlockedByPolicy = true
+			refunded, refundIsPartial, refundBlockedByPolicy = calculateClinicBookingRefund(r.clinicRefundPolicy, debitAmount, time.Now().UTC(), slotStart)
+			if refunded <= 0 {
+				// policy blocked or zero refund, nothing to write
 			} else {
-				refunded = -debitAmount
 				refundOp := fmt.Sprintf("clinic_booking:refund:%d", bookingID)
 				var existing int64
 				err = tx.QueryRowContext(ctx, `
@@ -569,6 +583,7 @@ func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bo
 		RefundedCents:         refunded,
 		BalanceAfter:          balanceAfter,
 		RefundApplied:         refundApplied,
+		RefundIsPartial:       refundIsPartial && refunded > 0,
 		RefundBlockedByPolicy: refundBlockedByPolicy,
 	}, nil
 }
@@ -1356,6 +1371,27 @@ func (r *PostgresRepository) CountOutboxByStatus(ctx context.Context) (map[strin
 		out[status] = n
 	}
 	return out, rows.Err()
+}
+
+func (r *PostgresRepository) CountWalletBalanceMismatches(ctx context.Context) (int64, error) {
+	var mismatches int64
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM user_profiles up
+		LEFT JOIN wallet_balance_read_model wrm
+		  ON wrm.telegram_user_id = up.telegram_user_id
+		LEFT JOIN LATERAL (
+			SELECT wt.balance_after
+			FROM wallet_transactions wt
+			WHERE wt.telegram_user_id = up.telegram_user_id
+			ORDER BY wt.id DESC
+			LIMIT 1
+		) last_tx ON TRUE
+		WHERE wrm.telegram_user_id IS NULL
+		   OR up.balance_cents <> wrm.balance_cents
+		   OR (last_tx.balance_after IS NOT NULL AND up.balance_cents <> last_tx.balance_after)
+	`).Scan(&mismatches)
+	return mismatches, err
 }
 
 func (r *PostgresRepository) UpsertWalletBalanceReadModel(ctx context.Context, userID int64, balanceCents int64, lastTxID *int64) error {
