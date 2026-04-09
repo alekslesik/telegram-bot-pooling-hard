@@ -878,6 +878,9 @@ func (s *BookingService) CancelClinicBooking(ctx context.Context, userID, bookin
 	if result.RefundApplied {
 		msg += fmt.Sprintf("\nВозврат: +%d коп.\nБаланс после возврата: %d коп.", result.RefundedCents, result.BalanceAfter)
 	}
+	if result.RefundBlockedByPolicy {
+		msg += "\nВозврат недоступен: время приема уже началось."
+	}
 	return msg, nil
 }
 

@@ -128,6 +128,9 @@ func TestMemoryRepository_CancelClinicBooking_AfterStart_NoRefund(t *testing.T) 
 	if res.RefundApplied || res.RefundedCents != 0 {
 		t.Fatalf("expected no refund after slot start, got applied=%v refunded=%d", res.RefundApplied, res.RefundedCents)
 	}
+	if !res.RefundBlockedByPolicy {
+		t.Fatal("expected refund to be marked as blocked by policy after slot start")
+	}
 
 	p1, err := repo.GetUserProfile(ctx, userID)
 	if err != nil {

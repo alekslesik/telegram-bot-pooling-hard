@@ -108,10 +108,11 @@ type ClinicBookingView struct {
 }
 
 type CancelClinicBookingResult struct {
-	Booking       ClinicBookingView
-	RefundedCents int64
-	BalanceAfter  int64
-	RefundApplied bool
+	Booking               ClinicBookingView
+	RefundedCents         int64
+	BalanceAfter          int64
+	RefundApplied         bool
+	RefundBlockedByPolicy bool
 }
 
 type WalletTransaction struct {
@@ -579,6 +580,7 @@ func (r *MemoryRepository) CancelClinicBooking(_ context.Context, userID, bookin
 
 	var refunded int64
 	var balanceAfter int64
+	var refundBlockedByPolicy bool
 	if now.Before(slotStart) {
 		for _, tx := range r.walletTx {
 			if tx.TxType != "debit" || tx.RelatedBookingID == nil || *tx.RelatedBookingID != bookingID {
@@ -626,12 +628,20 @@ func (r *MemoryRepository) CancelClinicBooking(_ context.Context, userID, bookin
 			_ = r.enqueueOutboxLocked(fmt.Sprintf("booking_refunded:%d", bookingID), "booking_refunded", "clinic_booking", &bookingIDCopy, fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"refunded_cents":%d}`, bookingID, userID, refunded), now)
 			break
 		}
+	} else {
+		for _, tx := range r.walletTx {
+			if tx.TxType == "debit" && tx.RelatedBookingID != nil && *tx.RelatedBookingID == bookingID && tx.AmountCents < 0 {
+				refundBlockedByPolicy = true
+				break
+			}
+		}
 	}
 	return CancelClinicBookingResult{
-		Booking:       r.toClinicBookingViewLocked(b),
-		RefundedCents: refunded,
-		BalanceAfter:  balanceAfter,
-		RefundApplied: refunded > 0,
+		Booking:               r.toClinicBookingViewLocked(b),
+		RefundedCents:         refunded,
+		BalanceAfter:          balanceAfter,
+		RefundApplied:         refunded > 0,
+		RefundBlockedByPolicy: refundBlockedByPolicy,
 	}, nil
 }
 
