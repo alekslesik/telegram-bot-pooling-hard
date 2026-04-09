@@ -71,6 +71,8 @@ Main variables:
 - `DB_DSN` - optional full DSN for local/non-Compose runs. If unset, the bot builds a DSN from `DB_PASSWORD_FILE` (set automatically in Compose) plus `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`. If neither `DB_DSN` nor `DB_PASSWORD_FILE` is available, the bot uses in-memory storage.
 - `REDIS_ADDR` - optional, e.g. `localhost:6379` or `redis:6379` in Compose; enables caching of specialty list pages.
 - `APP_ENV`, `LOG_LEVEL`, `LOG_FORMAT` - runtime options.
+- `CLINIC_REFUND_PARTIAL_WINDOW` - optional partial-refund window for booking cancel policy (Go duration, default `24h`).
+- `CLINIC_REFUND_PARTIAL_PERCENT` - optional partial-refund percentage in range `0..100` (default `50`).
 
 ### Database migration
 
