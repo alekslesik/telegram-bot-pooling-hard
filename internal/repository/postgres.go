@@ -13,16 +13,29 @@ import (
 )
 
 type PostgresRepository struct {
-	db               *sql.DB
-	outboxSchemaMu   sync.Mutex
-	outboxSchemaDone bool
+	db                 *sql.DB
+	outboxSchemaMu     sync.Mutex
+	outboxSchemaDone   bool
+	clinicRefundPolicy ClinicBookingRefundPolicy
 }
 
 func NewPostgresRepository(db *sql.DB) *PostgresRepository {
-	r := &PostgresRepository{db: db}
+	r := &PostgresRepository{
+		db:                 db,
+		clinicRefundPolicy: DefaultClinicBookingRefundPolicy(),
+	}
 	// Best-effort startup bootstrap to avoid first-tick outbox relation errors on fresh DBs.
 	_ = r.ensureOutboxSchema(context.Background())
 	return r
+}
+
+func (r *PostgresRepository) SetClinicBookingRefundPolicy(policy ClinicBookingRefundPolicy) error {
+	normalized, err := NormalizeClinicBookingRefundPolicy(policy)
+	if err != nil {
+		return err
+	}
+	r.clinicRefundPolicy = normalized
+	return nil
 }
 
 func (r *PostgresRepository) ListActiveServices(ctx context.Context) ([]Service, error) {
@@ -483,7 +496,7 @@ func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bo
 			return CancelClinicBookingResult{}, err
 		}
 		if debitAmount < 0 {
-			refunded, refundIsPartial, refundBlockedByPolicy = calculateClinicBookingRefund(debitAmount, time.Now().UTC(), slotStart)
+			refunded, refundIsPartial, refundBlockedByPolicy = calculateClinicBookingRefund(r.clinicRefundPolicy, debitAmount, time.Now().UTC(), slotStart)
 			if refunded <= 0 {
 				// policy blocked or zero refund, nothing to write
 			} else {

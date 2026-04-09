@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/bot"
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/logging"
+	"github.com/alekslesik/telegram-bot-pooling-hard/internal/repository"
 )
 
 func TestFormatBuildDate_RFC3339(t *testing.T) {
@@ -52,6 +54,8 @@ type stubTelegram struct {
 	last tgbotapi.Chattable
 	err  error
 }
+
+const errUnexpectedFmt = "unexpected error: %v"
 
 func (s *stubTelegram) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
 	s.last = c
@@ -154,5 +158,84 @@ func TestClearBotCommands_ErrorLogged(t *testing.T) {
 	clearBotCommands(st, logging.NewWithWriter(&buf))
 	if !bytes.Contains(buf.Bytes(), []byte("failed to clear bot commands")) {
 		t.Fatalf("unexpected log output: %s", buf.String())
+	}
+}
+
+func TestLoadClinicRefundPolicyFromEnvDefaults(t *testing.T) {
+	t.Setenv("CLINIC_REFUND_PARTIAL_WINDOW", "")
+	t.Setenv("CLINIC_REFUND_PARTIAL_PERCENT", "")
+
+	p, err := loadClinicRefundPolicyFromEnv()
+	if err != nil {
+		t.Fatalf(errUnexpectedFmt, err)
+	}
+	if p.PartialWindow != 24*time.Hour {
+		t.Fatalf("unexpected default window: %s", p.PartialWindow)
+	}
+	if p.PartialPercent != 50 {
+		t.Fatalf("unexpected default percent: %d", p.PartialPercent)
+	}
+}
+
+func TestLoadClinicRefundPolicyFromEnvOverrides(t *testing.T) {
+	t.Setenv("CLINIC_REFUND_PARTIAL_WINDOW", "6h")
+	t.Setenv("CLINIC_REFUND_PARTIAL_PERCENT", "25")
+
+	p, err := loadClinicRefundPolicyFromEnv()
+	if err != nil {
+		t.Fatalf(errUnexpectedFmt, err)
+	}
+	if p.PartialWindow != 6*time.Hour {
+		t.Fatalf("unexpected window: %s", p.PartialWindow)
+	}
+	if p.PartialPercent != 25 {
+		t.Fatalf("unexpected percent: %d", p.PartialPercent)
+	}
+}
+
+func TestLoadClinicRefundPolicyFromEnvInvalid(t *testing.T) {
+	t.Setenv("CLINIC_REFUND_PARTIAL_WINDOW", "bad")
+	t.Setenv("CLINIC_REFUND_PARTIAL_PERCENT", "101")
+
+	if _, err := loadClinicRefundPolicyFromEnv(); err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestBuildBookingRepositoryAppliesConfiguredRefundPolicy(t *testing.T) {
+	t.Setenv("DB_DSN", "")
+	t.Setenv("DB_PASSWORD_FILE", "")
+	t.Setenv("CLINIC_REFUND_PARTIAL_WINDOW", "1000h")
+	t.Setenv("CLINIC_REFUND_PARTIAL_PERCENT", "10")
+
+	repo, db, err := buildBookingRepository(logging.NewWithWriter(&bytes.Buffer{}))
+	if err != nil {
+		t.Fatalf(errUnexpectedFmt, err)
+	}
+	if db != nil {
+		t.Fatal("expected nil db for in-memory mode")
+	}
+
+	mem, ok := repo.(*repository.MemoryRepository)
+	if !ok {
+		t.Fatalf("expected *MemoryRepository, got %T", repo)
+	}
+
+	ctx := context.Background()
+	const userID int64 = 991
+	if _, err := mem.EnsureUserProfile(ctx, userID); err != nil {
+		t.Fatalf("ensure profile: %v", err)
+	}
+
+	paid, err := mem.ConfirmPaidClinicBooking(ctx, userID, 100, 1, 1, 1, "op-policy-env-991")
+	if err != nil {
+		t.Fatalf("confirm paid: %v", err)
+	}
+	res, err := mem.CancelClinicBooking(ctx, userID, paid.BookingID)
+	if err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if !res.RefundApplied || res.RefundedCents != 10 {
+		t.Fatalf("expected 10-cent partial refund from env policy, got applied=%v refunded=%d", res.RefundApplied, res.RefundedCents)
 	}
 }

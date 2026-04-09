@@ -289,15 +289,16 @@ type MemoryRepository struct {
 	adminLogs    []AdminAuditLog
 	nextAdminLog int64
 
-	userProfiles    map[int64]UserProfile
-	analyticsEvents []memoryAnalyticsEvent
-	nextAnalyticID  int64
-	walletTx        map[int64]WalletTransaction
-	walletTxByOp    map[string]int64
-	nextWalletTxID  int64
-	walletReadModel map[int64]WalletBalanceReadModel
-	outboxEvents    map[int64]OutboxEvent
-	nextOutboxID    int64
+	userProfiles       map[int64]UserProfile
+	analyticsEvents    []memoryAnalyticsEvent
+	nextAnalyticID     int64
+	walletTx           map[int64]WalletTransaction
+	walletTxByOp       map[string]int64
+	nextWalletTxID     int64
+	walletReadModel    map[int64]WalletBalanceReadModel
+	outboxEvents       map[int64]OutboxEvent
+	nextOutboxID       int64
+	clinicRefundPolicy ClinicBookingRefundPolicy
 }
 
 type memoryAnalyticsEvent struct {
@@ -314,7 +315,29 @@ const (
 	refundPercentPart   = int64(50)
 )
 
-func calculateClinicBookingRefund(debitAmount int64, now, slotStart time.Time) (refundCents int64, isPartial bool, blockedByPolicy bool) {
+type ClinicBookingRefundPolicy struct {
+	PartialWindow  time.Duration
+	PartialPercent int64
+}
+
+func DefaultClinicBookingRefundPolicy() ClinicBookingRefundPolicy {
+	return ClinicBookingRefundPolicy{
+		PartialWindow:  refundPartialWindow,
+		PartialPercent: refundPercentPart,
+	}
+}
+
+func NormalizeClinicBookingRefundPolicy(policy ClinicBookingRefundPolicy) (ClinicBookingRefundPolicy, error) {
+	if policy.PartialWindow <= 0 {
+		return ClinicBookingRefundPolicy{}, fmt.Errorf("partial window must be positive")
+	}
+	if policy.PartialPercent < 0 || policy.PartialPercent > refundPercentBase {
+		return ClinicBookingRefundPolicy{}, fmt.Errorf("partial percent must be within 0..100")
+	}
+	return policy, nil
+}
+
+func calculateClinicBookingRefund(policy ClinicBookingRefundPolicy, debitAmount int64, now, slotStart time.Time) (refundCents int64, isPartial bool, blockedByPolicy bool) {
 	if debitAmount >= 0 {
 		return 0, false, false
 	}
@@ -322,8 +345,8 @@ func calculateClinicBookingRefund(debitAmount int64, now, slotStart time.Time) (
 	if !now.Before(slotStart) {
 		return 0, false, true
 	}
-	if slotStart.Sub(now) < refundPartialWindow {
-		refund := (feeCents*refundPercentPart + refundPercentBase - 1) / refundPercentBase
+	if slotStart.Sub(now) < policy.PartialWindow {
+		refund := (feeCents*policy.PartialPercent + refundPercentBase - 1) / refundPercentBase
 		if refund >= feeCents {
 			return feeCents, false, false
 		}
@@ -334,37 +357,49 @@ func calculateClinicBookingRefund(debitAmount int64, now, slotStart time.Time) (
 
 func NewMemoryRepository() *MemoryRepository {
 	r := &MemoryRepository{
-		services:        make(map[int64]Service),
-		slots:           make(map[int64]Slot),
-		bookings:        make(map[int64]Booking),
-		states:          make(map[int64]ConversationState),
-		clients:         make(map[int64]Client),
-		specialties:     make(map[int64]Specialty),
-		doctors:         make(map[int64]Doctor),
-		doctorLinks:     make(map[int64]map[int64]struct{}),
-		doctorSlots:     make(map[int64]DoctorSlot),
-		clinicBooking:   make(map[int64]ClinicBooking),
-		documents:       make(map[int64]UserDocument),
-		nextBookingID:   1,
-		nextServiceID:   1,
-		nextSlotID:      1,
-		nextClinicID:    1,
-		nextDocID:       1,
-		admins:          make(map[int64]AdminRole),
-		adminLogs:       []AdminAuditLog{},
-		nextAdminLog:    1,
-		userProfiles:    make(map[int64]UserProfile),
-		analyticsEvents: []memoryAnalyticsEvent{},
-		nextAnalyticID:  1,
-		walletTx:        make(map[int64]WalletTransaction),
-		walletTxByOp:    make(map[string]int64),
-		nextWalletTxID:  1,
-		walletReadModel: make(map[int64]WalletBalanceReadModel),
-		outboxEvents:    make(map[int64]OutboxEvent),
-		nextOutboxID:    1,
+		services:           make(map[int64]Service),
+		slots:              make(map[int64]Slot),
+		bookings:           make(map[int64]Booking),
+		states:             make(map[int64]ConversationState),
+		clients:            make(map[int64]Client),
+		specialties:        make(map[int64]Specialty),
+		doctors:            make(map[int64]Doctor),
+		doctorLinks:        make(map[int64]map[int64]struct{}),
+		doctorSlots:        make(map[int64]DoctorSlot),
+		clinicBooking:      make(map[int64]ClinicBooking),
+		documents:          make(map[int64]UserDocument),
+		nextBookingID:      1,
+		nextServiceID:      1,
+		nextSlotID:         1,
+		nextClinicID:       1,
+		nextDocID:          1,
+		admins:             make(map[int64]AdminRole),
+		adminLogs:          []AdminAuditLog{},
+		nextAdminLog:       1,
+		userProfiles:       make(map[int64]UserProfile),
+		analyticsEvents:    []memoryAnalyticsEvent{},
+		nextAnalyticID:     1,
+		walletTx:           make(map[int64]WalletTransaction),
+		walletTxByOp:       make(map[string]int64),
+		nextWalletTxID:     1,
+		walletReadModel:    make(map[int64]WalletBalanceReadModel),
+		outboxEvents:       make(map[int64]OutboxEvent),
+		nextOutboxID:       1,
+		clinicRefundPolicy: DefaultClinicBookingRefundPolicy(),
 	}
 	r.seed()
 	return r
+}
+
+func (r *MemoryRepository) SetClinicBookingRefundPolicy(policy ClinicBookingRefundPolicy) error {
+	normalized, err := NormalizeClinicBookingRefundPolicy(policy)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.clinicRefundPolicy = normalized
+	return nil
 }
 
 func randomReferralCode() (string, error) {
@@ -619,7 +654,7 @@ func (r *MemoryRepository) CancelClinicBooking(_ context.Context, userID, bookin
 		if !ok {
 			break
 		}
-		refunded, refundIsPartial, refundBlockedByPolicy = calculateClinicBookingRefund(tx.AmountCents, now, slotStart)
+		refunded, refundIsPartial, refundBlockedByPolicy = calculateClinicBookingRefund(r.clinicRefundPolicy, tx.AmountCents, now, slotStart)
 		if refunded <= 0 {
 			break
 		}

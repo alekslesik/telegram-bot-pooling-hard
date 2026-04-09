@@ -236,3 +236,42 @@ func TestMemoryRepository_WalletReadModel_UpdatedAfterDebitAndRefund(t *testing.
 		t.Fatal("expected last_tx_id after refund")
 	}
 }
+
+func TestMemoryRepository_CancelClinicBooking_UsesConfiguredPartialRefundPolicy(t *testing.T) {
+	repo := NewMemoryRepository()
+	if err := repo.SetClinicBookingRefundPolicy(ClinicBookingRefundPolicy{
+		PartialWindow:  2 * time.Hour,
+		PartialPercent: 25,
+	}); err != nil {
+		t.Fatalf("set refund policy: %v", err)
+	}
+
+	ctx := context.Background()
+	const userID int64 = 403
+
+	if _, err := repo.EnsureUserProfile(ctx, userID); err != nil {
+		t.Fatal(err)
+	}
+
+	repo.mu.Lock()
+	slot := repo.doctorSlots[1]
+	slot.StartAt = time.Now().UTC().Add(30 * time.Minute)
+	repo.doctorSlots[1] = slot
+	repo.mu.Unlock()
+
+	paid, err := repo.ConfirmPaidClinicBooking(ctx, userID, 100, 1, 1, 1, "op-policy-403")
+	if err != nil {
+		t.Fatalf("paid booking error: %v", err)
+	}
+
+	res, err := repo.CancelClinicBooking(ctx, userID, paid.BookingID)
+	if err != nil {
+		t.Fatalf("cancel error: %v", err)
+	}
+	if !res.RefundApplied || !res.RefundIsPartial {
+		t.Fatalf("expected configured partial refund, got applied=%v partial=%v", res.RefundApplied, res.RefundIsPartial)
+	}
+	if res.RefundedCents != 25 {
+		t.Fatalf("expected configured partial refund amount 25, got %d", res.RefundedCents)
+	}
+}
