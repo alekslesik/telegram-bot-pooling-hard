@@ -7,12 +7,31 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/repository"
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/service"
 )
+
+type fakePayments struct {
+	validateErr error
+	applyErr    error
+	result      repository.StarsTopUpResult
+}
+
+func (f fakePayments) BuildTopUpInvoicePayload(userID, stars int64) (string, error) {
+	return "payload", nil
+}
+
+func (f fakePayments) ValidatePreCheckout(fromUserID int64, currency string, totalStars int64, payload string) error {
+	return f.validateErr
+}
+
+func (f fakePayments) ApplySuccessfulPayment(fromUserID int64, sp *tgbotapi.SuccessfulPayment) (repository.StarsTopUpResult, error) {
+	return f.result, f.applyErr
+}
 
 type fakeBot struct {
 	last tgbotapi.Chattable
@@ -23,7 +42,8 @@ func (f *fakeBot) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
 	return tgbotapi.Message{}, nil
 }
 
-func (f *fakeBot) Request(tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
+func (f *fakeBot) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
+	f.last = c
 	return &tgbotapi.APIResponse{Ok: true}, nil
 }
 
@@ -179,6 +199,33 @@ func TestDemoInlineMenuKeyboard(t *testing.T) {
 	}
 }
 
+func TestAdminKeyboard_VisibilityByCapabilities(t *testing.T) {
+	h := newTestHandlers(&fakeBot{})
+	owner := service.AdminCapabilities{
+		CanOpenPanel:      true,
+		CanManageCatalog:  true,
+		CanManageDaySlots: true,
+		CanViewAnalytics:  true,
+		CanManageAdmins:   true,
+		CanManageBlackout: true,
+	}
+	keyboard := h.adminKeyboard(owner)
+	var data []string
+	for _, row := range keyboard.InlineKeyboard {
+		for _, btn := range row {
+			if btn.CallbackData != nil {
+				data = append(data, *btn.CallbackData)
+			}
+		}
+	}
+	joined := strings.Join(data, ",")
+	for _, expected := range []string{"admin:slotsrange", "admin:closedays", "admin:opendays", "admin:blackout", "admin:adminupsert"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("expected callback %s in keyboard, got %s", expected, joined)
+		}
+	}
+}
+
 func TestHandlers_HandleCommand_AllRegistered(t *testing.T) {
 	tests := []struct {
 		cmd      string
@@ -283,8 +330,8 @@ func TestHandlers_HandleCallback_UnknownData(t *testing.T) {
 		},
 		Data: "other",
 	})
-	if fb.last != nil {
-		t.Fatalf("unknown callback should not send a message, got %T", fb.last)
+	if _, ok := fb.last.(tgbotapi.CallbackConfig); !ok {
+		t.Fatalf("unknown callback should answer callback only, got %T", fb.last)
 	}
 }
 
@@ -364,5 +411,172 @@ func TestHandlers_BookingFlow(t *testing.T) {
 	handled, msg, err = h.Booking.HandleText(context.Background(), 1, "1")
 	if err != nil || handled || msg != "" {
 		t.Fatalf("expected registration flow completed: handled=%v err=%v msg=%q", handled, err, msg)
+	}
+}
+
+func TestHandlers_HandlePreCheckout_Reject(t *testing.T) {
+	fb := &fakeBot{}
+	h := newTestHandlers(fb)
+	h.Payments = fakePayments{validateErr: errors.New("bad payload")}
+	h.HandlePreCheckout(&tgbotapi.PreCheckoutQuery{
+		ID:             "pcq1",
+		Currency:       "XTR",
+		TotalAmount:    10,
+		InvoicePayload: "bad",
+		From:           &tgbotapi.User{ID: 7, LanguageCode: "en"},
+	})
+	cfg, ok := fb.last.(tgbotapi.PreCheckoutConfig)
+	if !ok {
+		t.Fatalf("expected PreCheckoutConfig, got %T", fb.last)
+	}
+	if cfg.OK {
+		t.Fatal("expected rejected pre-checkout")
+	}
+	if cfg.ErrorMessage == "" {
+		t.Fatal("expected localized error message")
+	}
+}
+
+func TestHandlers_HandleMessage_SuccessfulPayment_SendsConfirmation(t *testing.T) {
+	fb := &fakeBot{}
+	h := newTestHandlers(fb)
+	h.Payments = fakePayments{result: repository.StarsTopUpResult{BalanceAfter: 1234}}
+	h.HandleMessage(&tgbotapi.Message{
+		Chat: &tgbotapi.Chat{ID: 100},
+		From: &tgbotapi.User{ID: 100, LanguageCode: "en"},
+		SuccessfulPayment: &tgbotapi.SuccessfulPayment{
+			Currency:       "XTR",
+			TotalAmount:    15,
+			InvoicePayload: "p",
+		},
+	})
+	cfg, ok := fb.last.(tgbotapi.MessageConfig)
+	if !ok {
+		t.Fatalf("expected MessageConfig, got %T", fb.last)
+	}
+	if !strings.Contains(cfg.Text, "Новый баланс") {
+		t.Fatalf("expected payment success confirmation, got %q", cfg.Text)
+	}
+}
+
+func TestHandlers_HandleBookingCallback_LogsFunnelSpecialtySelected(t *testing.T) {
+	fb := &fakeBot{}
+	repo := repository.NewMemoryRepository()
+	h := newTestHandlers(fb)
+	h.Booking = service.NewBookingService(repo, nil)
+
+	h.handleBookingCallback(&tgbotapi.CallbackQuery{
+		Data: "book:spec:12:0",
+		Message: &tgbotapi.Message{
+			Chat: &tgbotapi.Chat{ID: 10},
+		},
+		From: &tgbotapi.User{ID: 77},
+	})
+
+	counts, err := repo.CountAnalyticsByEventSince(context.Background(), time.Now().Add(-1*time.Minute))
+	if err != nil {
+		t.Fatalf("count analytics: %v", err)
+	}
+	if got := counts["funnel_book_specialty_selected"]; got != 1 {
+		t.Fatalf("expected funnel_book_specialty_selected=1, got %d", got)
+	}
+}
+
+func TestHandlers_HandleBookingCallback_LogsFunnelDoctorSelected(t *testing.T) {
+	fb := &fakeBot{}
+	repo := repository.NewMemoryRepository()
+	h := newTestHandlers(fb)
+	h.Booking = service.NewBookingService(repo, nil)
+
+	h.handleBookingCallback(&tgbotapi.CallbackQuery{
+		Data: "book:doc:12:34:0",
+		Message: &tgbotapi.Message{
+			Chat: &tgbotapi.Chat{ID: 10},
+		},
+		From: &tgbotapi.User{ID: 77},
+	})
+
+	counts, err := repo.CountAnalyticsByEventSince(context.Background(), time.Now().Add(-1*time.Minute))
+	if err != nil {
+		t.Fatalf("count analytics: %v", err)
+	}
+	if got := counts["funnel_book_doctor_selected"]; got != 1 {
+		t.Fatalf("expected funnel_book_doctor_selected=1, got %d", got)
+	}
+}
+
+func TestHandlers_HandleBookingCallback_LogsFunnelSlotSelected(t *testing.T) {
+	fb := &fakeBot{}
+	repo := repository.NewMemoryRepository()
+	h := newTestHandlers(fb)
+	h.Booking = service.NewBookingService(repo, nil)
+
+	h.handleBookingCallback(&tgbotapi.CallbackQuery{
+		Data: "book:slot:12:34:56",
+		Message: &tgbotapi.Message{
+			Chat: &tgbotapi.Chat{ID: 10},
+		},
+		From: &tgbotapi.User{ID: 77},
+	})
+
+	counts, err := repo.CountAnalyticsByEventSince(context.Background(), time.Now().Add(-1*time.Minute))
+	if err != nil {
+		t.Fatalf("count analytics: %v", err)
+	}
+	if got := counts["funnel_book_slot_selected"]; got != 1 {
+		t.Fatalf("expected funnel_book_slot_selected=1, got %d", got)
+	}
+}
+
+func TestHandlers_HandleAdminCallback_AnalyticsPeriods(t *testing.T) {
+	fb := &fakeBot{}
+	repo := repository.NewMemoryRepository()
+	h := newTestHandlers(fb)
+	h.Booking = service.NewBookingService(repo, nil)
+	repo.SetAdminRole(77, repository.AdminRoleAdmin)
+
+	cases := []string{"admin:analytics", "admin:analytics:30"}
+	for _, data := range cases {
+		h.handleAdminCallback(&tgbotapi.CallbackQuery{
+			Data: data,
+			Message: &tgbotapi.Message{
+				Chat: &tgbotapi.Chat{ID: 10},
+			},
+			From: &tgbotapi.User{ID: 77},
+		})
+
+		cfg, ok := fb.last.(tgbotapi.MessageConfig)
+		if !ok {
+			t.Fatalf("expected MessageConfig, got %T", fb.last)
+		}
+		if !strings.Contains(cfg.Text, "outbox_pending") {
+			t.Fatalf("expected analytics report text for %q, got %q", data, cfg.Text)
+		}
+	}
+}
+
+func TestHandlers_AdminKeyboard_AnalyticsPeriodButtons(t *testing.T) {
+	h := newTestHandlers(&fakeBot{})
+	kb := h.adminKeyboard(service.AdminCapabilities{CanViewAnalytics: true})
+	if kb == nil {
+		t.Fatalf("expected keyboard")
+	}
+
+	var has7, has30 bool
+	for _, row := range kb.InlineKeyboard {
+		for _, btn := range row {
+			if btn.CallbackData == nil {
+				continue
+			}
+			if *btn.CallbackData == "admin:analytics:7" {
+				has7 = true
+			}
+			if *btn.CallbackData == "admin:analytics:30" {
+				has30 = true
+			}
+		}
+	}
+	if !has7 || !has30 {
+		t.Fatalf("expected analytics period buttons, got has7=%v has30=%v", has7, has30)
 	}
 }

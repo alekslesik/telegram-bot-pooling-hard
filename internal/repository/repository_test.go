@@ -202,3 +202,54 @@ func TestMemoryRepository_GetAdminRole(t *testing.T) {
 		t.Fatalf("expected ErrNotFound for unknown admin role, got: %v", err)
 	}
 }
+
+func TestMemoryRepository_GenerateDoctorSlotsDateRange(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	from := time.Date(2030, 5, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2030, 5, 2, 0, 0, 0, 0, time.UTC)
+
+	inserted, err := repo.GenerateDoctorSlotsDateRange(ctx, 1, 1, from, to, 10*60, 11*60, 30)
+	if err != nil {
+		t.Fatalf("range generate error: %v", err)
+	}
+	if inserted < 4 {
+		t.Fatalf("expected at least 4 inserts, got %d", inserted)
+	}
+
+	again, err := repo.GenerateDoctorSlotsDateRange(ctx, 1, 1, from, to, 10*60, 11*60, 30)
+	if err != nil {
+		t.Fatalf("range generate second call error: %v", err)
+	}
+	if again != 0 {
+		t.Fatalf("expected 0 new inserts on duplicate call, got %d", again)
+	}
+}
+
+func TestMemoryRepository_AdminRosterUpsertAndList(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	rec, err := repo.UpsertAdmin(ctx, 42, AdminRoleOperator, true)
+	if err != nil {
+		t.Fatalf("upsert admin error: %v", err)
+	}
+	if rec.Role != AdminRoleOperator || !rec.IsActive {
+		t.Fatalf("unexpected admin record: %+v", rec)
+	}
+	rec, err = repo.UpsertAdmin(ctx, 42, AdminRoleAdmin, false)
+	if err != nil {
+		t.Fatalf("upsert admin update error: %v", err)
+	}
+	if rec.Role != AdminRoleAdmin || rec.IsActive {
+		t.Fatalf("unexpected updated record: %+v", rec)
+	}
+	active, err := repo.ListAdmins(ctx, false, 0, 0)
+	if err != nil {
+		t.Fatalf("list admins error: %v", err)
+	}
+	for _, item := range active {
+		if item.TelegramUserID == 42 {
+			t.Fatalf("inactive admin should be filtered out")
+		}
+	}
+}

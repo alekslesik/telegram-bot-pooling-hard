@@ -224,11 +224,26 @@ func (r *PostgresRepository) GetDoctorByID(ctx context.Context, doctorID int64) 
 func (r *PostgresRepository) ListAvailableDoctorSlots(ctx context.Context, specialtyID, doctorID int64, limit, offset int) ([]DoctorSlot, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, doctor_id, specialty_id, start_at, is_available
-		FROM doctor_slots
-		WHERE specialty_id = $1
-		  AND doctor_id = $2
-		  AND is_available = TRUE
-		  AND start_at >= NOW()
+		FROM doctor_slots ds
+		WHERE ds.specialty_id = $1
+		  AND ds.doctor_id = $2
+		  AND ds.is_available = TRUE
+		  AND ds.start_at >= NOW()
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM schedule_blackout_rules br
+			WHERE br.is_active = TRUE
+			  AND ds.start_at >= br.starts_at
+			  AND ds.start_at < br.ends_at
+			  AND (
+				br.scope = 'global'
+				OR (
+					br.scope = 'doctor_specialty'
+					AND br.doctor_id = ds.doctor_id
+					AND br.specialty_id = ds.specialty_id
+				)
+			  )
+		  )
 		ORDER BY start_at ASC
 		LIMIT $3 OFFSET $4`, specialtyID, doctorID, limit, offset)
 	if err != nil {
@@ -251,11 +266,26 @@ func (r *PostgresRepository) CountAvailableDoctorSlots(ctx context.Context, spec
 	var count int
 	err := r.db.QueryRowContext(ctx, `
 		SELECT COUNT(*)
-		FROM doctor_slots
-		WHERE specialty_id = $1
-		  AND doctor_id = $2
-		  AND is_available = TRUE
-		  AND start_at >= NOW()`, specialtyID, doctorID).Scan(&count)
+		FROM doctor_slots ds
+		WHERE ds.specialty_id = $1
+		  AND ds.doctor_id = $2
+		  AND ds.is_available = TRUE
+		  AND ds.start_at >= NOW()
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM schedule_blackout_rules br
+			WHERE br.is_active = TRUE
+			  AND ds.start_at >= br.starts_at
+			  AND ds.start_at < br.ends_at
+			  AND (
+				br.scope = 'global'
+				OR (
+					br.scope = 'doctor_specialty'
+					AND br.doctor_id = ds.doctor_id
+					AND br.specialty_id = ds.specialty_id
+				)
+			  )
+		  )`, specialtyID, doctorID).Scan(&count)
 	return count, err
 }
 
@@ -664,6 +694,89 @@ func (r *PostgresRepository) GetAdminRole(ctx context.Context, userID int64) (Ad
 	return AdminRole(strings.TrimSpace(role)), nil
 }
 
+func (r *PostgresRepository) UpsertAdmin(ctx context.Context, telegramUserID int64, role AdminRole, isActive bool) (AdminRecord, error) {
+	var out AdminRecord
+	err := r.db.QueryRowContext(ctx, `
+		INSERT INTO admins (telegram_user_id, role, is_active)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (telegram_user_id) DO UPDATE
+		SET role = EXCLUDED.role,
+		    is_active = EXCLUDED.is_active,
+		    updated_at = NOW()
+		RETURNING telegram_user_id, role, is_active, created_at, updated_at
+	`, telegramUserID, string(role), isActive).
+		Scan(&out.TelegramUserID, &out.Role, &out.IsActive, &out.CreatedAt, &out.UpdatedAt)
+	return out, err
+}
+
+func (r *PostgresRepository) ListAdmins(ctx context.Context, includeInactive bool, limit, offset int) ([]AdminRecord, error) {
+	query := `
+		SELECT telegram_user_id, role, is_active, created_at, updated_at
+		FROM admins`
+	args := []any{}
+	if !includeInactive {
+		query += ` WHERE is_active = TRUE`
+	}
+	query += ` ORDER BY role ASC, telegram_user_id ASC`
+	if limit > 0 {
+		query += ` LIMIT $1 OFFSET $2`
+		args = append(args, limit, offset)
+	}
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AdminRecord
+	for rows.Next() {
+		var item AdminRecord
+		if err := rows.Scan(&item.TelegramUserID, &item.Role, &item.IsActive, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (r *PostgresRepository) CountAdmins(ctx context.Context, includeInactive bool) (int, error) {
+	var count int
+	query := `SELECT COUNT(*) FROM admins`
+	if !includeInactive {
+		query += ` WHERE is_active = TRUE`
+	}
+	err := r.db.QueryRowContext(ctx, query).Scan(&count)
+	return count, err
+}
+
+func (r *PostgresRepository) ListAdminAuditLogs(ctx context.Context, adminUserID *int64, limit, offset int) ([]AdminAuditLog, error) {
+	query := `
+		SELECT id, admin_user_id, action, details, created_at
+		FROM admin_audit_logs`
+	args := []any{}
+	if adminUserID != nil {
+		query += ` WHERE admin_user_id = $1`
+		args = append(args, *adminUserID)
+	}
+	query += ` ORDER BY created_at DESC, id DESC`
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d OFFSET %d", limit, offset)
+	}
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AdminAuditLog
+	for rows.Next() {
+		var item AdminAuditLog
+		if err := rows.Scan(&item.ID, &item.AdminUserID, &item.Action, &item.Details, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func (r *PostgresRepository) ListAllSpecialties(ctx context.Context) ([]Specialty, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, name, sort_order, is_active
@@ -755,12 +868,81 @@ func (r *PostgresRepository) GenerateDoctorSlots(ctx context.Context, doctorID, 
 				$4::timestamptz - make_interval(mins => $5::int),
 				make_interval(mins => $5::int)
 			) gs
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM schedule_blackout_rules br
+				WHERE br.is_active = TRUE
+				  AND gs >= br.starts_at
+				  AND gs < br.ends_at
+				  AND (
+					br.scope = 'global'
+					OR (
+						br.scope = 'doctor_specialty'
+						AND br.doctor_id = $1
+						AND br.specialty_id = $2
+					)
+				  )
+			)
 			ON CONFLICT (doctor_id, specialty_id, start_at) DO NOTHING
 			RETURNING 1
 		)
 		SELECT COUNT(*) FROM ins
 	`, doctorID, specialtyID, startAt, endAt, stepMinutes).Scan(&count)
 	return count, err
+}
+
+func (r *PostgresRepository) GenerateDoctorSlotsDateRange(ctx context.Context, doctorID, specialtyID int64, fromDate, toDate time.Time, startMinute, endMinute, stepMinutes int) (int, error) {
+	if toDate.Before(fromDate) {
+		return 0, nil
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	total := 0
+	for day := time.Date(fromDate.Year(), fromDate.Month(), fromDate.Day(), 0, 0, 0, 0, time.UTC); !day.After(time.Date(toDate.Year(), toDate.Month(), toDate.Day(), 0, 0, 0, 0, time.UTC)); day = day.AddDate(0, 0, 1) {
+		startAt := day.Add(time.Duration(startMinute) * time.Minute)
+		endAt := day.Add(time.Duration(endMinute) * time.Minute)
+		var count int
+		err := tx.QueryRowContext(ctx, `
+			WITH ins AS (
+				INSERT INTO doctor_slots (doctor_id, specialty_id, start_at, is_available)
+				SELECT $1, $2, gs, TRUE
+				FROM generate_series(
+					$3::timestamptz,
+					$4::timestamptz - make_interval(mins => $5::int),
+					make_interval(mins => $5::int)
+				) gs
+				WHERE NOT EXISTS (
+					SELECT 1
+					FROM schedule_blackout_rules br
+					WHERE br.is_active = TRUE
+					  AND gs >= br.starts_at
+					  AND gs < br.ends_at
+					  AND (
+						br.scope = 'global'
+						OR (
+							br.scope = 'doctor_specialty'
+							AND br.doctor_id = $1
+							AND br.specialty_id = $2
+						)
+					  )
+				)
+				ON CONFLICT (doctor_id, specialty_id, start_at) DO NOTHING
+				RETURNING 1
+			)
+			SELECT COUNT(*) FROM ins
+		`, doctorID, specialtyID, startAt, endAt, stepMinutes).Scan(&count)
+		if err != nil {
+			return total, err
+		}
+		total += count
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return total, nil
 }
 
 func (r *PostgresRepository) CloseDoctorDay(ctx context.Context, doctorID, specialtyID int64, date time.Time) (int, error) {
@@ -798,6 +980,21 @@ func (r *PostgresRepository) OpenDoctorDay(ctx context.Context, doctorID, specia
 			WHERE cb.doctor_slot_id = ds.id
 			  AND cb.status = 'confirmed'
 		  )
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM schedule_blackout_rules br
+			WHERE br.is_active = TRUE
+			  AND ds.start_at >= br.starts_at
+			  AND ds.start_at < br.ends_at
+			  AND (
+				br.scope = 'global'
+				OR (
+					br.scope = 'doctor_specialty'
+					AND br.doctor_id = ds.doctor_id
+					AND br.specialty_id = ds.specialty_id
+				)
+			  )
+		  )
 	`, doctorID, specialtyID, base)
 	if err != nil {
 		return 0, err
@@ -807,6 +1004,95 @@ func (r *PostgresRepository) OpenDoctorDay(ctx context.Context, doctorID, specia
 		return 0, err
 	}
 	return int(aff), nil
+}
+
+func (r *PostgresRepository) CloseDoctorDaysRange(ctx context.Context, doctorID, specialtyID int64, fromDate, toDate time.Time) (int, error) {
+	if toDate.Before(fromDate) {
+		return 0, nil
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	total := 0
+	for day := time.Date(fromDate.Year(), fromDate.Month(), fromDate.Day(), 0, 0, 0, 0, time.UTC); !day.After(time.Date(toDate.Year(), toDate.Month(), toDate.Day(), 0, 0, 0, 0, time.UTC)); day = day.AddDate(0, 0, 1) {
+		res, err := tx.ExecContext(ctx, `
+			UPDATE doctor_slots
+			SET is_available = FALSE
+			WHERE doctor_id = $1
+			  AND specialty_id = $2
+			  AND start_at >= $3
+			  AND start_at < ($3 + INTERVAL '1 day')
+		`, doctorID, specialtyID, day)
+		if err != nil {
+			return total, err
+		}
+		aff, err := res.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += int(aff)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+func (r *PostgresRepository) OpenDoctorDaysRange(ctx context.Context, doctorID, specialtyID int64, fromDate, toDate time.Time) (int, error) {
+	if toDate.Before(fromDate) {
+		return 0, nil
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	total := 0
+	for day := time.Date(fromDate.Year(), fromDate.Month(), fromDate.Day(), 0, 0, 0, 0, time.UTC); !day.After(time.Date(toDate.Year(), toDate.Month(), toDate.Day(), 0, 0, 0, 0, time.UTC)); day = day.AddDate(0, 0, 1) {
+		res, err := tx.ExecContext(ctx, `
+			UPDATE doctor_slots ds
+			SET is_available = TRUE
+			WHERE ds.doctor_id = $1
+			  AND ds.specialty_id = $2
+			  AND ds.start_at >= $3
+			  AND ds.start_at < ($3 + INTERVAL '1 day')
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM clinic_bookings cb
+				WHERE cb.doctor_slot_id = ds.id
+				  AND cb.status = 'confirmed'
+			  )
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM schedule_blackout_rules br
+				WHERE br.is_active = TRUE
+				  AND ds.start_at >= br.starts_at
+				  AND ds.start_at < br.ends_at
+				  AND (
+					br.scope = 'global'
+					OR (
+						br.scope = 'doctor_specialty'
+						AND br.doctor_id = ds.doctor_id
+						AND br.specialty_id = ds.specialty_id
+					)
+				  )
+			  )
+		`, doctorID, specialtyID, day)
+		if err != nil {
+			return total, err
+		}
+		aff, err := res.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += int(aff)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return total, nil
 }
 
 func (r *PostgresRepository) ListDoctorSlotsForDay(ctx context.Context, doctorID, specialtyID int64, date time.Time) ([]DoctorSlotDayView, error) {
@@ -851,6 +1137,104 @@ func (r *PostgresRepository) LogAdminAction(ctx context.Context, adminUserID int
 		INSERT INTO admin_audit_logs (admin_user_id, action, details)
 		VALUES ($1, $2, $3)`, adminUserID, action, details)
 	return err
+}
+
+func (r *PostgresRepository) CreateBlackoutRule(ctx context.Context, rule ScheduleBlackoutRule) (ScheduleBlackoutRule, error) {
+	if strings.TrimSpace(string(rule.Scope)) == "" {
+		rule.Scope = BlackoutScopeDoctorSpecialty
+	}
+	if strings.TrimSpace(string(rule.Kind)) == "" {
+		rule.Kind = BlackoutKindBlackout
+	}
+	var doctorID any
+	var specialtyID any
+	if rule.DoctorID != nil {
+		doctorID = *rule.DoctorID
+	}
+	if rule.SpecialtyID != nil {
+		specialtyID = *rule.SpecialtyID
+	}
+	err := r.db.QueryRowContext(ctx, `
+		INSERT INTO schedule_blackout_rules (scope, kind, doctor_id, specialty_id, starts_at, ends_at, reason, is_active)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE)
+		RETURNING id, scope, kind, doctor_id, specialty_id, starts_at, ends_at, reason, is_active, created_at, updated_at
+	`, rule.Scope, rule.Kind, doctorID, specialtyID, rule.StartsAt, rule.EndsAt, rule.Reason).
+		Scan(&rule.ID, &rule.Scope, &rule.Kind, &rule.DoctorID, &rule.SpecialtyID, &rule.StartsAt, &rule.EndsAt, &rule.Reason, &rule.IsActive, &rule.CreatedAt, &rule.UpdatedAt)
+	return rule, err
+}
+
+func (r *PostgresRepository) ListBlackoutRules(ctx context.Context, from, to time.Time, doctorID, specialtyID *int64) ([]ScheduleBlackoutRule, error) {
+	query := `
+		SELECT id, scope, kind, doctor_id, specialty_id, starts_at, ends_at, reason, is_active, created_at, updated_at
+		FROM schedule_blackout_rules
+		WHERE is_active = TRUE
+		  AND starts_at < $1
+		  AND ends_at > $2`
+	args := []any{to, from}
+	if doctorID != nil {
+		query += ` AND (doctor_id = $3 OR scope = 'global')`
+		args = append(args, *doctorID)
+	}
+	if specialtyID != nil {
+		if len(args) == 2 {
+			query += ` AND (specialty_id = $3 OR scope = 'global')`
+		} else {
+			query += ` AND (specialty_id = $4 OR scope = 'global')`
+		}
+		args = append(args, *specialtyID)
+	}
+	query += ` ORDER BY starts_at ASC`
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ScheduleBlackoutRule
+	for rows.Next() {
+		var item ScheduleBlackoutRule
+		if err := rows.Scan(&item.ID, &item.Scope, &item.Kind, &item.DoctorID, &item.SpecialtyID, &item.StartsAt, &item.EndsAt, &item.Reason, &item.IsActive, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (r *PostgresRepository) DeactivateBlackoutRule(ctx context.Context, ruleID int64) error {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE schedule_blackout_rules
+		SET is_active = FALSE, updated_at = NOW()
+		WHERE id = $1
+	`, ruleID)
+	if err != nil {
+		return err
+	}
+	aff, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if aff == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *PostgresRepository) IsDoctorSlotBlocked(ctx context.Context, doctorID, specialtyID int64, at time.Time) (bool, error) {
+	var blocked bool
+	err := r.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM schedule_blackout_rules br
+			WHERE br.is_active = TRUE
+			  AND $1 >= br.starts_at
+			  AND $1 < br.ends_at
+			  AND (
+				br.scope = 'global'
+				OR (br.scope = 'doctor_specialty' AND br.doctor_id = $2 AND br.specialty_id = $3)
+			  )
+		)
+	`, at, doctorID, specialtyID).Scan(&blocked)
+	return blocked, err
 }
 
 func (r *PostgresRepository) GetConversationState(ctx context.Context, userID int64) (ConversationState, error) {
@@ -1063,6 +1447,61 @@ func (r *PostgresRepository) CountAnalyticsByEventSince(ctx context.Context, sin
 	return out, rows.Err()
 }
 
+func (r *PostgresRepository) CountClinicBookingsCancelledSince(ctx context.Context, since time.Time) (int64, error) {
+	var count int64
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM clinic_bookings
+		WHERE status = 'cancelled'
+		  AND cancelled_at IS NOT NULL
+		  AND cancelled_at >= $1`, since).Scan(&count)
+	return count, err
+}
+
+func (r *PostgresRepository) CountNoShowProxySince(ctx context.Context, since time.Time) (int64, error) {
+	var count int64
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM clinic_bookings cb
+		INNER JOIN doctor_slots ds ON ds.id = cb.doctor_slot_id
+		WHERE cb.status = 'confirmed'
+		  AND ds.start_at < NOW()
+		  AND ds.start_at >= $1`, since).Scan(&count)
+	return count, err
+}
+
+func (r *PostgresRepository) CountReferralRewardsGrantedSince(ctx context.Context, since time.Time) (int64, error) {
+	var count int64
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM user_profiles
+		WHERE referral_reward_granted = TRUE
+		  AND updated_at >= $1`, since).Scan(&count)
+	return count, err
+}
+
+func (r *PostgresRepository) CountBookingsConfirmedSinceWithOptionalSpecialty(ctx context.Context, since time.Time, specialtyID *int64) (int64, error) {
+	var (
+		count int64
+		err   error
+	)
+	if specialtyID == nil {
+		err = r.db.QueryRowContext(ctx, `
+			SELECT COUNT(*)
+			FROM clinic_bookings
+			WHERE status = 'confirmed'
+			  AND created_at >= $1`, since).Scan(&count)
+	} else {
+		err = r.db.QueryRowContext(ctx, `
+			SELECT COUNT(*)
+			FROM clinic_bookings
+			WHERE status = 'confirmed'
+			  AND created_at >= $1
+			  AND specialty_id = $2`, since, *specialtyID).Scan(&count)
+	}
+	return count, err
+}
+
 func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userID, feeCents, specialtyID, doctorID, slotID int64, operationID string) (PaidBookingResult, error) {
 	if err := r.ensureOutboxSchema(ctx); err != nil {
 		return PaidBookingResult{}, err
@@ -1143,6 +1582,21 @@ func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userI
 		UPDATE doctor_slots
 		SET is_available = FALSE
 		WHERE id = $1 AND doctor_id = $2 AND specialty_id = $3 AND is_available = TRUE
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM schedule_blackout_rules br
+			WHERE br.is_active = TRUE
+			  AND doctor_slots.start_at >= br.starts_at
+			  AND doctor_slots.start_at < br.ends_at
+			  AND (
+				br.scope = 'global'
+				OR (
+					br.scope = 'doctor_specialty'
+					AND br.doctor_id = doctor_slots.doctor_id
+					AND br.specialty_id = doctor_slots.specialty_id
+				)
+			  )
+		  )
 		RETURNING start_at`, slotID, doctorID, specialtyID).Scan(&slotStart)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = ErrNotFound
@@ -1221,6 +1675,97 @@ func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userI
 		SlotStart:      slotStart,
 		BalanceAfter:   newBal,
 		BookingCreated: createdAt,
+	}, nil
+}
+
+func (r *PostgresRepository) ApplyTelegramStarsTopUp(ctx context.Context, userID, starsCount, kopeksPerStar int64, telegramPaymentChargeID, metadataJSON string) (StarsTopUpResult, error) {
+	chargeID := strings.TrimSpace(telegramPaymentChargeID)
+	if chargeID == "" {
+		return StarsTopUpResult{}, fmt.Errorf("telegram payment charge id is required")
+	}
+	operationID := "tg_stars:" + chargeID
+	creditedCents := starsCount * kopeksPerStar
+	metadataJSON = coalesceJSON(metadataJSON)
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return StarsTopUpResult{}, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var existing WalletTransaction
+	err = tx.QueryRowContext(ctx, `
+		SELECT id, telegram_user_id, operation_id, tx_type, amount_cents, balance_before, balance_after,
+		       related_booking_id, metadata_json, created_at
+		FROM wallet_transactions
+		WHERE operation_id = $1
+		LIMIT 1`, operationID).
+		Scan(&existing.ID, &existing.TelegramUserID, &existing.OperationID, &existing.TxType, &existing.AmountCents,
+			&existing.BalanceBefore, &existing.BalanceAfter, &existing.RelatedBookingID, &existing.MetadataJSON, &existing.CreatedAt)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return StarsTopUpResult{}, err
+	}
+	if err == nil {
+		if err = tx.Commit(); err != nil {
+			return StarsTopUpResult{}, err
+		}
+		return StarsTopUpResult{
+			BalanceAfter:   existing.BalanceAfter,
+			CreditedCents:  existing.AmountCents,
+			AlreadyApplied: true,
+		}, nil
+	}
+
+	var balanceBefore int64
+	err = tx.QueryRowContext(ctx, `
+		SELECT balance_cents
+		FROM user_profiles
+		WHERE telegram_user_id = $1
+		FOR UPDATE`, userID).Scan(&balanceBefore)
+	if errors.Is(err, sql.ErrNoRows) {
+		return StarsTopUpResult{}, ErrNotFound
+	}
+	if err != nil {
+		return StarsTopUpResult{}, err
+	}
+
+	var balanceAfter int64
+	err = tx.QueryRowContext(ctx, `
+		UPDATE user_profiles
+		SET balance_cents = balance_cents + $2, updated_at = NOW()
+		WHERE telegram_user_id = $1
+		RETURNING balance_cents`, userID, creditedCents).Scan(&balanceAfter)
+	if err != nil {
+		return StarsTopUpResult{}, err
+	}
+
+	var walletTxID int64
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO wallet_transactions (
+			telegram_user_id, operation_id, tx_type, amount_cents,
+			balance_before, balance_after, related_booking_id, metadata_json
+		) VALUES ($1, $2, 'credit', $3, $4, $5, NULL, $6::jsonb)
+		RETURNING id`,
+		userID, operationID, creditedCents, balanceBefore, balanceAfter, metadataJSON).Scan(&walletTxID)
+	if err != nil {
+		return StarsTopUpResult{}, err
+	}
+
+	if err = r.upsertWalletBalanceReadModelTx(ctx, tx, userID, balanceAfter, &walletTxID); err != nil {
+		return StarsTopUpResult{}, err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return StarsTopUpResult{}, err
+	}
+	return StarsTopUpResult{
+		BalanceAfter:   balanceAfter,
+		CreditedCents:  creditedCents,
+		AlreadyApplied: false,
 	}, nil
 }
 
