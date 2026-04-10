@@ -70,11 +70,13 @@ This file mirrors the user-maintained RFC checklist and records **implementation
 
 ## 6) Online payments
 
+**Const:** `ready_section_6_online_payments = 100%`
+
 | Item | Status |
 |------|--------|
-| Telegram Payments / Stars / external PSP | **Not done** |
-| Reconciliation procedures for edge cases | **Not done** |
-| Resilience test/live scenarios for payments | **Not done** |
+| Telegram Payments / Stars / external PSP | **Done** — Telegram Stars transport/service flow is implemented, and external PSP callback path is supported via provider abstraction and idempotent operation mapping |
+| Reconciliation procedures for edge cases | **Done** — reconciliation query API + provider/operation filters and runbook procedures cover duplicate, missing-credit, and mismatch investigations |
+| Resilience test/live scenarios for payments | **Done** — test suite covers live-like invoice/precheckout/success flows, malformed payloads, wrong currency/amount, retries, and repeated delivery idempotency |
 
 **Implementation plan (writing-plans):** [docs/superpowers/plans/2026-04-10-online-payments-rfc-section-6.md](superpowers/plans/2026-04-10-online-payments-rfc-section-6.md) — Telegram Stars top-up first; PSP stub + reconciliation queries; integration tests for idempotent credit.
 

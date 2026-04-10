@@ -60,3 +60,4 @@ Do a lightweight cycle:
 
 - During multi-step implementation tasks, after each completed step report current completion percentage to the user (e.g., `Progress: 35%`), based on the execution plan for that task.
 - If the user explicitly asks for percentage reporting, include a progress percentage update after every operational step until the task is fully complete.
+- If the user asks to track a specific RFC section by percent, report that section-level readiness variable from `docs/rfc-todo-status.md` (for example `ready_section_6_online_payments`) instead of per-step percentages.

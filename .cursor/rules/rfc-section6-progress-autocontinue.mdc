@@ -1,0 +1,7 @@
+# RFC Section 6 Progress Auto-Continue
+
+- Maintain and update the variable `ready_section_6_online_payments` in `docs/rfc-todo-status.md` after each meaningful change affecting RFC section 6.
+- When reporting progress for this initiative, report only the RFC section 6 percent from `ready_section_6_online_payments` (do not report per-step percentages unless explicitly requested in addition).
+- Before stopping work on section 6, check `ready_section_6_online_payments`.
+- If `ready_section_6_online_payments != 100%` and there are no blocking questions for the user, continue execution using `dispatching-parallel-agents`.
+- When `ready_section_6_online_payments` reaches `100%`, complete full finish flow: run required tests/checks per rules, open/update PR, monitor CI to green, check merge conflicts and resolve them if present.
