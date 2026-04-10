@@ -130,6 +130,8 @@ make docker-compose-down
 
 ## CI/CD and Deployment
 
+Operational procedures (rollback, DB recovery, secret rotation, alerting): see [`docs/ops/RUNBOOK.md`](docs/ops/RUNBOOK.md).
+
 Workflows in [`.github/workflows`](.github/workflows):
 
 | Workflow | Trigger | What it does |

@@ -55,6 +55,24 @@ type stubTelegram struct {
 	err  error
 }
 
+type fakeDedup struct {
+	duplicate bool
+	err       error
+}
+
+func (f fakeDedup) Seen(_ context.Context, _ int) (bool, error) {
+	return f.duplicate, f.err
+}
+
+type fakeLimiter struct {
+	allowed bool
+	err     error
+}
+
+func (f fakeLimiter) Allow(_ context.Context, _ int64, _ string) (bool, error) {
+	return f.allowed, f.err
+}
+
 const errUnexpectedFmt = "unexpected error: %v"
 
 func (s *stubTelegram) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
@@ -111,6 +129,42 @@ func TestApplyTelegramUpdate_empty(t *testing.T) {
 	}
 }
 
+func TestDispatchTelegramUpdate_DropsDuplicate(t *testing.T) {
+	st := &stubTelegram{}
+	h := bot.Handlers{Bot: st, Logger: logging.NewWithWriter(&bytes.Buffer{})}
+	dispatchTelegramUpdate(context.Background(), logging.NewWithWriter(&bytes.Buffer{}), &h, tgbotapi.Update{
+		UpdateID: 777,
+		Message:  &tgbotapi.Message{From: &tgbotapi.User{ID: 1}, Chat: &tgbotapi.Chat{ID: 1}, Text: "x"},
+	}, fakeDedup{duplicate: true}, nil, nil)
+	if st.last != nil {
+		t.Fatalf("expected duplicate update to be dropped, got %T", st.last)
+	}
+}
+
+func TestDispatchTelegramUpdate_DropsRateLimitedMessage(t *testing.T) {
+	st := &stubTelegram{}
+	h := bot.Handlers{Bot: st, Logger: logging.NewWithWriter(&bytes.Buffer{})}
+	dispatchTelegramUpdate(context.Background(), logging.NewWithWriter(&bytes.Buffer{}), &h, tgbotapi.Update{
+		UpdateID: 778,
+		Message:  &tgbotapi.Message{From: &tgbotapi.User{ID: 1}, Chat: &tgbotapi.Chat{ID: 1}, Text: "x"},
+	}, nil, fakeLimiter{allowed: false}, nil)
+	if st.last != nil {
+		t.Fatalf("expected rate-limited message to be dropped, got %T", st.last)
+	}
+}
+
+func TestDispatchTelegramUpdate_AllowsWhenLimiterErrors(t *testing.T) {
+	st := &stubTelegram{}
+	h := bot.Handlers{Bot: st, Logger: logging.NewWithWriter(&bytes.Buffer{})}
+	dispatchTelegramUpdate(context.Background(), logging.NewWithWriter(&bytes.Buffer{}), &h, tgbotapi.Update{
+		UpdateID: 779,
+		Message:  &tgbotapi.Message{From: &tgbotapi.User{ID: 1}, Chat: &tgbotapi.Chat{ID: 1}, Text: "x"},
+	}, nil, fakeLimiter{err: errors.New("boom")}, nil)
+	if st.last == nil {
+		t.Fatal("expected update to pass through when limiter fails")
+	}
+}
+
 func TestLogAuthorized_withExpectedUsername(t *testing.T) {
 	var buf bytes.Buffer
 	logAuthorized(logging.NewWithWriter(&buf), "want", "got")
@@ -137,6 +191,24 @@ func TestTokenFromEnv(t *testing.T) {
 func TestLongPollTimeoutSeconds(t *testing.T) {
 	if longPollTimeoutSeconds() != 60 {
 		t.Fatal("unexpected long poll timeout")
+	}
+}
+
+func TestTelegramRateLimitConfigDefaults(t *testing.T) {
+	t.Setenv("TELEGRAM_RATE_LIMIT_MSG_PER_MIN", "")
+	t.Setenv("TELEGRAM_RATE_LIMIT_CALLBACK_PER_MIN", "")
+	msg, callback := telegramRateLimitConfig()
+	if msg != 0 || callback != 0 {
+		t.Fatalf("expected disabled defaults, got msg=%d callback=%d", msg, callback)
+	}
+}
+
+func TestTelegramRateLimitConfigValues(t *testing.T) {
+	t.Setenv("TELEGRAM_RATE_LIMIT_MSG_PER_MIN", "5")
+	t.Setenv("TELEGRAM_RATE_LIMIT_CALLBACK_PER_MIN", "7")
+	msg, callback := telegramRateLimitConfig()
+	if msg != 5 || callback != 7 {
+		t.Fatalf("unexpected config: msg=%d callback=%d", msg, callback)
 	}
 }
 
