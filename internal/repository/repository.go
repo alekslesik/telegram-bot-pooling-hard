@@ -153,6 +153,13 @@ type OutboxEvent struct {
 	UpdatedAt     time.Time
 }
 
+// OutboxOperationalStats exposes queue health metrics for admin/ops (RFC §2).
+type OutboxOperationalStats struct {
+	OldestPendingAgeSeconds int64
+	PendingWithRetries      int64
+	SumAttemptsQueued       int64
+}
+
 type UserDocument struct {
 	ID             int64
 	TelegramUserID int64
@@ -264,6 +271,7 @@ type BookingRepository interface {
 	MarkOutboxEventFailed(ctx context.Context, eventID int64, lastError string, nextAttemptAt time.Time) error
 	MarkOutboxEventDead(ctx context.Context, eventID int64, lastError string) error
 	CountOutboxByStatus(ctx context.Context) (map[string]int64, error)
+	GetOutboxOperationalStats(ctx context.Context) (OutboxOperationalStats, error)
 	CountWalletBalanceMismatches(ctx context.Context) (int64, error)
 }
 
@@ -562,6 +570,11 @@ func (r *MemoryRepository) CreateClinicBooking(_ context.Context, booking Clinic
 		booking.CreatedAt = time.Now().UTC()
 	}
 	r.clinicBooking[booking.ID] = booking
+	bid := booking.ID
+	_ = r.enqueueOutboxLocked(fmt.Sprintf("booking_created:%d", bid), "booking_created", "clinic_booking", &bid,
+		fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"specialty_id":%d,"doctor_id":%d,"slot_id":%d,"status":%q}`,
+			bid, booking.TelegramUserID, booking.SpecialtyID, booking.DoctorID, booking.DoctorSlotID, booking.Status),
+		booking.CreatedAt)
 	return booking, nil
 }
 
@@ -1463,7 +1476,13 @@ func (r *MemoryRepository) ConfirmPaidClinicBooking(_ context.Context, userID, f
 		UpdatedAt:      booking.CreatedAt,
 	}
 	bookingIDCopy := booking.ID
-	_ = r.enqueueOutboxLocked(fmt.Sprintf("booking_confirmed:%d", booking.ID), "booking_confirmed", "clinic_booking", &bookingIDCopy, fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"specialty_id":%d,"doctor_id":%d,"slot_id":%d}`, booking.ID, userID, specialtyID, doctorID, slotID), booking.CreatedAt)
+	_ = r.enqueueOutboxLocked(fmt.Sprintf("booking_created:%d", booking.ID), "booking_created", "clinic_booking", &bookingIDCopy,
+		fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"specialty_id":%d,"doctor_id":%d,"slot_id":%d,"status":"confirmed"}`, booking.ID, userID, specialtyID, doctorID, slotID),
+		booking.CreatedAt)
+	_ = r.enqueueOutboxLocked(fmt.Sprintf("payment_confirmed:%d", booking.ID), "payment_confirmed", "clinic_booking", &bookingIDCopy,
+		fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"specialty_id":%d,"doctor_id":%d,"slot_id":%d,"fee_cents":%d,"operation_id":%q}`,
+			booking.ID, userID, specialtyID, doctorID, slotID, feeCents, operationID),
+		booking.CreatedAt)
 
 	spec := r.specialties[specialtyID]
 	doc := r.doctors[doctorID]
@@ -1616,6 +1635,34 @@ func (r *MemoryRepository) CountOutboxByStatus(_ context.Context) (map[string]in
 		out[ev.Status]++
 	}
 	return out, nil
+}
+
+func (r *MemoryRepository) GetOutboxOperationalStats(_ context.Context) (OutboxOperationalStats, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var stats OutboxOperationalStats
+	var oldest *time.Time
+	now := time.Now().UTC()
+	for _, ev := range r.outboxEvents {
+		if ev.Status == "pending" && ev.Attempts > 0 {
+			stats.PendingWithRetries++
+		}
+		if ev.Status == "pending" || ev.Status == "processing" {
+			stats.SumAttemptsQueued += int64(ev.Attempts)
+		}
+		if ev.Status == "pending" {
+			t := ev.AvailableAt
+			if oldest == nil || t.Before(*oldest) {
+				oldest = &t
+			}
+		}
+	}
+	if oldest != nil {
+		if d := now.Sub(*oldest); d > 0 {
+			stats.OldestPendingAgeSeconds = int64(d.Seconds())
+		}
+	}
+	return stats, nil
 }
 
 func (r *MemoryRepository) CountWalletBalanceMismatches(_ context.Context) (int64, error) {

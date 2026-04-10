@@ -353,7 +353,25 @@ func (r *PostgresRepository) CreateClinicBooking(ctx context.Context, booking Cl
 		booking.DoctorSlotID,
 		booking.Status,
 	).Scan(&booking.ID, &booking.CreatedAt)
-	return booking, err
+	if err != nil {
+		return booking, err
+	}
+	if err := r.ensureOutboxSchema(ctx); err != nil {
+		return booking, err
+	}
+	bid := booking.ID
+	_, err = r.EnqueueOutboxEvent(ctx, OutboxEvent{
+		DedupeKey:     fmt.Sprintf("booking_created:%d", booking.ID),
+		EventType:     "booking_created",
+		AggregateType: "clinic_booking",
+		AggregateID:   &bid,
+		PayloadJSON: fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"specialty_id":%d,"doctor_id":%d,"slot_id":%d,"status":%q}`,
+			booking.ID, booking.TelegramUserID, booking.SpecialtyID, booking.DoctorID, booking.DoctorSlotID, booking.Status),
+	})
+	if err != nil {
+		return booking, err
+	}
+	return booking, nil
 }
 
 func (r *PostgresRepository) MarkDoctorSlotUnavailable(ctx context.Context, slotID int64) error {
@@ -1144,6 +1162,18 @@ func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userI
 	if err != nil {
 		return PaidBookingResult{}, err
 	}
+	bookingIDCopy := bookingID
+	createdPayload := fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"specialty_id":%d,"doctor_id":%d,"slot_id":%d,"status":"confirmed"}`,
+		bookingID, userID, specialtyID, doctorID, slotID)
+	if err = r.enqueueOutboxEventTx(ctx, tx, OutboxEvent{
+		DedupeKey:     fmt.Sprintf("booking_created:%d", bookingID),
+		EventType:     "booking_created",
+		AggregateType: "clinic_booking",
+		AggregateID:   &bookingIDCopy,
+		PayloadJSON:   createdPayload,
+	}); err != nil {
+		return PaidBookingResult{}, err
+	}
 
 	var walletTxID int64
 	err = tx.QueryRowContext(ctx, `
@@ -1159,13 +1189,14 @@ func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userI
 	if err = r.upsertWalletBalanceReadModelTx(ctx, tx, userID, newBal, &walletTxID); err != nil {
 		return PaidBookingResult{}, err
 	}
-	bookingIDCopy := bookingID
+	paymentPayload := fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"specialty_id":%d,"doctor_id":%d,"slot_id":%d,"fee_cents":%d,"operation_id":%q}`,
+		bookingID, userID, specialtyID, doctorID, slotID, feeCents, operationID)
 	if err = r.enqueueOutboxEventTx(ctx, tx, OutboxEvent{
-		DedupeKey:     fmt.Sprintf("booking_confirmed:%d", bookingID),
-		EventType:     "booking_confirmed",
+		DedupeKey:     fmt.Sprintf("payment_confirmed:%d", bookingID),
+		EventType:     "payment_confirmed",
 		AggregateType: "clinic_booking",
 		AggregateID:   &bookingIDCopy,
-		PayloadJSON:   fmt.Sprintf(`{"booking_id":%d,"user_id":%d,"specialty_id":%d,"doctor_id":%d,"slot_id":%d}`, bookingID, userID, specialtyID, doctorID, slotID),
+		PayloadJSON:   paymentPayload,
 	}); err != nil {
 		return PaidBookingResult{}, err
 	}
@@ -1371,6 +1402,29 @@ func (r *PostgresRepository) CountOutboxByStatus(ctx context.Context) (map[strin
 		out[status] = n
 	}
 	return out, rows.Err()
+}
+
+func (r *PostgresRepository) GetOutboxOperationalStats(ctx context.Context) (OutboxOperationalStats, error) {
+	if err := r.ensureOutboxSchema(ctx); err != nil {
+		return OutboxOperationalStats{}, err
+	}
+	var stats OutboxOperationalStats
+	var oldest sql.NullTime
+	err := r.db.QueryRowContext(ctx, `
+		SELECT
+			(SELECT MIN(available_at) FROM outbox_events WHERE status = 'pending'),
+			(SELECT COUNT(*) FROM outbox_events WHERE status = 'pending' AND attempts > 0),
+			(SELECT COALESCE(SUM(attempts), 0) FROM outbox_events WHERE status IN ('pending','processing'))
+	`).Scan(&oldest, &stats.PendingWithRetries, &stats.SumAttemptsQueued)
+	if err != nil {
+		return OutboxOperationalStats{}, err
+	}
+	if oldest.Valid {
+		if d := time.Since(oldest.Time.UTC()); d > 0 {
+			stats.OldestPendingAgeSeconds = int64(d.Seconds())
+		}
+	}
+	return stats, nil
 }
 
 func (r *PostgresRepository) CountWalletBalanceMismatches(ctx context.Context) (int64, error) {

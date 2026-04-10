@@ -19,9 +19,9 @@ func TestOutboxWorkerTickMarksDone(t *testing.T) {
 	repo := repository.NewMemoryRepository()
 	ctx := context.Background()
 	_, err := repo.EnqueueOutboxEvent(ctx, repository.OutboxEvent{
-		EventType:     "booking_confirmed",
+		EventType:     "payment_confirmed",
 		AggregateType: "clinic_booking",
-		PayloadJSON:   `{"booking_id":1}`,
+		PayloadJSON:   `{"booking_id":1,"user_id":1,"slot_id":1}`,
 	})
 	if err != nil {
 		t.Fatalf(errEnqueueFmt, err)
@@ -29,7 +29,7 @@ func TestOutboxWorkerTickMarksDone(t *testing.T) {
 
 	var handled int32
 	worker := NewOutboxWorker(repo, func(_ context.Context, event repository.OutboxEvent) error {
-		if event.EventType == "booking_confirmed" {
+		if event.EventType == "payment_confirmed" {
 			atomic.AddInt32(&handled, 1)
 		}
 		return nil
@@ -145,5 +145,40 @@ func TestOutboxWorkerTickMarksDeadAfterMaxAttempts(t *testing.T) {
 	}
 	if analytics["outbox_event_dead"] != 1 {
 		t.Fatalf("expected outbox_event_dead=1, got %d", analytics["outbox_event_dead"])
+	}
+}
+
+func TestOutboxWorkerDeadLetterHook(t *testing.T) {
+	repo := repository.NewMemoryRepository()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	_, err := repo.EnqueueOutboxEvent(ctx, repository.OutboxEvent{
+		EventType:     "booking_refunded",
+		AggregateType: "clinic_booking",
+		PayloadJSON:   `{"booking_id":3}`,
+		AvailableAt:   now,
+	})
+	if err != nil {
+		t.Fatalf(errEnqueueFmt, err)
+	}
+
+	var hookCalled bool
+	var hookEv repository.OutboxEvent
+	worker := NewOutboxWorker(repo, func(_ context.Context, _ repository.OutboxEvent) error {
+		return errors.New("permanent downstream failure")
+	}, 10, 20*time.Millisecond, WithDeadLetterHook(func(_ context.Context, ev repository.OutboxEvent, _ error) {
+		hookCalled = true
+		hookEv = ev
+	}))
+	worker.maxAttempts = 1
+
+	if err := worker.Tick(ctx); err != nil {
+		t.Fatalf(errTickFmt, err)
+	}
+	if !hookCalled {
+		t.Fatal("expected dead letter hook")
+	}
+	if hookEv.EventType != "booking_refunded" {
+		t.Fatalf("unexpected hook event: %+v", hookEv)
 	}
 }

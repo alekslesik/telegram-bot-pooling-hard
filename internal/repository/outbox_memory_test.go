@@ -13,7 +13,7 @@ func TestMemoryRepository_OutboxLifecycle(t *testing.T) {
 	now := time.Now().UTC()
 
 	ev, err := repo.EnqueueOutboxEvent(ctx, OutboxEvent{
-		EventType:     "booking_confirmed",
+		EventType:     "payment_confirmed",
 		AggregateType: "clinic_booking",
 		PayloadJSON:   `{"booking_id":1}`,
 		AvailableAt:   now,
@@ -165,5 +165,27 @@ func TestMemoryRepository_CountOutboxByStatus(t *testing.T) {
 	}
 	if counts["pending"] != 1 || counts["processing"] != 1 || counts["done"] != 0 {
 		t.Fatalf("unexpected outbox counts: %+v", counts)
+	}
+}
+
+func TestMemoryRepository_GetOutboxOperationalStats(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	past := time.Now().UTC().Add(-2 * time.Minute)
+	_, err := repo.EnqueueOutboxEvent(ctx, OutboxEvent{
+		EventType:     "booking_refunded",
+		AggregateType: "clinic_booking",
+		PayloadJSON:   `{"booking_id":99}`,
+		AvailableAt:   past,
+	})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	stats, err := repo.GetOutboxOperationalStats(ctx)
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.OldestPendingAgeSeconds < 60 {
+		t.Fatalf("expected oldest pending age >= 60s, got %d", stats.OldestPendingAgeSeconds)
 	}
 }

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -168,7 +170,12 @@ func main() {
 			_, err := tg.Send(msg)
 			return err
 		}
-		outboxWorker := service.NewOutboxWorker(bookingRepo, service.NewBookingOutboxHandler(bookingRepo, reminderNotifier), 20, 30*time.Second)
+		var workerOpts []func(*service.OutboxWorker)
+		if u := strings.TrimSpace(os.Getenv("OUTBOX_DEAD_LETTER_WEBHOOK")); u != "" {
+			logger.Info("outbox dead-letter webhook enabled")
+			workerOpts = append(workerOpts, service.WithDeadLetterHook(deadLetterWebhookHook(u)))
+		}
+		outboxWorker := service.NewOutboxWorker(bookingRepo, service.NewBookingOutboxHandler(bookingRepo, reminderNotifier), 20, 30*time.Second, workerOpts...)
 		go outboxWorker.Run(workerCtx, 2*time.Second)
 		logger.Info("outbox worker enabled")
 	}
@@ -207,6 +214,33 @@ func main() {
 func outboxWorkerEnabled() bool {
 	raw := strings.TrimSpace(strings.ToLower(os.Getenv("OUTBOX_WORKER_ENABLED")))
 	return raw == "" || raw == "1" || raw == "true" || raw == "yes" || raw == "on"
+}
+
+// deadLetterWebhookHook POSTs JSON to OUTBOX_DEAD_LETTER_WEBHOOK after an event is marked failed (RFC §2 alerting).
+func deadLetterWebhookHook(url string) func(context.Context, repository.OutboxEvent, error) {
+	return func(ctx context.Context, ev repository.OutboxEvent, handlerErr error) {
+		payload := map[string]any{
+			"event_id":   ev.ID,
+			"event_type": ev.EventType,
+			"dedupe_key": ev.DedupeKey,
+			"last_error": handlerErr.Error(),
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Do(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		_ = err
+	}
 }
 
 func buildBookingRepository(logger slogLogger) (repository.BookingRepository, *sql.DB, error) {

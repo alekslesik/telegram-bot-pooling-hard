@@ -15,13 +15,13 @@ func TestBookingOutboxHandler_EnqueuesReminderEvent(t *testing.T) {
 
 	payload := `{"booking_id":9001,"user_id":42,"slot_id":1}`
 	_, err := repo.EnqueueOutboxEvent(ctx, repository.OutboxEvent{
-		EventType:     "booking_confirmed",
+		EventType:     "payment_confirmed",
 		AggregateType: "clinic_booking",
 		PayloadJSON:   payload,
 		AvailableAt:   time.Now().UTC(),
 	})
 	if err != nil {
-		t.Fatalf("enqueue booking_confirmed: %v", err)
+		t.Fatalf("enqueue payment_confirmed: %v", err)
 	}
 
 	worker := NewOutboxWorker(repo, NewBookingOutboxHandler(repo, nil), 20, 100*time.Millisecond)
@@ -30,12 +30,12 @@ func TestBookingOutboxHandler_EnqueuesReminderEvent(t *testing.T) {
 	}
 	// Reprocessing should not enqueue duplicate reminder due events.
 	if _, err := repo.EnqueueOutboxEvent(ctx, repository.OutboxEvent{
-		EventType:     "booking_confirmed",
+		EventType:     "payment_confirmed",
 		AggregateType: "clinic_booking",
 		PayloadJSON:   payload,
 		AvailableAt:   time.Now().UTC(),
 	}); err != nil {
-		t.Fatalf("enqueue duplicate booking_confirmed: %v", err)
+		t.Fatalf("enqueue duplicate payment_confirmed: %v", err)
 	}
 	if err := worker.Tick(ctx); err != nil {
 		t.Fatalf("tick duplicate error: %v", err)

@@ -90,28 +90,31 @@ func (s *BookingService) AdminAnalyticsReport(ctx context.Context, adminUserID i
 	if err != nil {
 		return "", err
 	}
+	ops, err := s.repo.GetOutboxOperationalStats(ctx)
+	if err != nil {
+		return "", err
+	}
 	walletMismatches, err := s.repo.CountWalletBalanceMismatches(ctx)
 	if err != nil {
 		return "", err
 	}
+	outboxTail := []string{
+		fmt.Sprintf("- outbox_pending: %d", outbox["pending"]),
+		fmt.Sprintf("- outbox_processing: %d", outbox["processing"]),
+		fmt.Sprintf("- outbox_done: %d", outbox["done"]),
+		fmt.Sprintf("- outbox_failed: %d", outbox["failed"]),
+		fmt.Sprintf("- outbox_oldest_pending_age_sec: %d", ops.OldestPendingAgeSeconds),
+		fmt.Sprintf("- outbox_pending_with_retries: %d", ops.PendingWithRetries),
+		fmt.Sprintf("- outbox_sum_attempts_queued: %d", ops.SumAttemptsQueued),
+		fmt.Sprintf("- wallet_balance_mismatches: %d", walletMismatches),
+	}
 	if len(counts) == 0 {
-		lines := []string{
-			fmt.Sprintf("- outbox_pending: %d", outbox["pending"]),
-			fmt.Sprintf("- outbox_processing: %d", outbox["processing"]),
-			fmt.Sprintf("- outbox_done: %d", outbox["done"]),
-			fmt.Sprintf("- wallet_balance_mismatches: %d", walletMismatches),
-		}
-		return strings.Join(lines, "\n"), nil
+		return strings.Join(outboxTail, "\n"), nil
 	}
 	var lines []string
 	for k, v := range counts {
 		lines = append(lines, fmt.Sprintf("- %s: %d", k, v))
 	}
-	lines = append(lines,
-		fmt.Sprintf("- outbox_pending: %d", outbox["pending"]),
-		fmt.Sprintf("- outbox_processing: %d", outbox["processing"]),
-		fmt.Sprintf("- outbox_done: %d", outbox["done"]),
-		fmt.Sprintf("- wallet_balance_mismatches: %d", walletMismatches),
-	)
+	lines = append(lines, outboxTail...)
 	return strings.Join(lines, "\n"), nil
 }
