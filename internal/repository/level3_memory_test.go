@@ -322,3 +322,25 @@ func TestMemoryRepositoryCountWalletBalanceMismatches(t *testing.T) {
 		t.Fatalf("expected 2 mismatches, got %d", got)
 	}
 }
+
+func TestMemoryRepository_ConfirmPaidClinicBooking_EnqueuesRFCOutboxEvents(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	const userID int64 = 9201
+	if _, err := repo.EnsureUserProfile(ctx, userID); err != nil {
+		t.Fatal(err)
+	}
+	_, err := repo.ConfirmPaidClinicBooking(ctx, userID, 100, 1, 1, 1, "op-rfc-outbox-events")
+	if err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+	repo.mu.RLock()
+	seen := map[string]int{}
+	for _, ev := range repo.outboxEvents {
+		seen[ev.EventType]++
+	}
+	repo.mu.RUnlock()
+	if seen["booking_created"] != 1 || seen["payment_confirmed"] != 1 {
+		t.Fatalf("expected booking_created and payment_confirmed once each, got %+v", seen)
+	}
+}

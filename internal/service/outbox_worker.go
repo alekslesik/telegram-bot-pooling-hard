@@ -16,9 +16,18 @@ type OutboxWorker struct {
 	batchSize   int
 	retryDelay  time.Duration
 	maxAttempts int
+	// deadLetterHook runs after MarkOutboxEventDead (terminal status=failed); use for webhooks/alerts (RFC §2).
+	deadLetterHook func(context.Context, repository.OutboxEvent, error)
 }
 
-func NewOutboxWorker(repo repository.BookingRepository, handler OutboxHandler, batchSize int, retryDelay time.Duration) *OutboxWorker {
+// WithDeadLetterHook registers a callback invoked when an outbox event exhausts retries (dead letter).
+func WithDeadLetterHook(fn func(context.Context, repository.OutboxEvent, error)) func(*OutboxWorker) {
+	return func(w *OutboxWorker) {
+		w.deadLetterHook = fn
+	}
+}
+
+func NewOutboxWorker(repo repository.BookingRepository, handler OutboxHandler, batchSize int, retryDelay time.Duration, opts ...func(*OutboxWorker)) *OutboxWorker {
 	if batchSize <= 0 {
 		batchSize = 20
 	}
@@ -26,13 +35,17 @@ func NewOutboxWorker(repo repository.BookingRepository, handler OutboxHandler, b
 		retryDelay = 30 * time.Second
 	}
 	maxAttempts := 5
-	return &OutboxWorker{
+	w := &OutboxWorker{
 		repo:        repo,
 		handler:     handler,
 		batchSize:   batchSize,
 		retryDelay:  retryDelay,
 		maxAttempts: maxAttempts,
 	}
+	for _, o := range opts {
+		o(w)
+	}
+	return w
 }
 
 func (w *OutboxWorker) Run(ctx context.Context, interval time.Duration) {
@@ -70,6 +83,9 @@ func (w *OutboxWorker) Tick(ctx context.Context) error {
 			if w.maxAttempts > 0 && item.Attempts >= w.maxAttempts {
 				_ = w.repo.LogAnalyticsEvent(ctx, nil, "outbox_event_dead", `{"event_id":`+strconv.FormatInt(item.ID, 10)+`,"event_type":"`+item.EventType+`","attempts":`+strconv.Itoa(item.Attempts)+`}`)
 				_ = w.repo.MarkOutboxEventDead(ctx, item.ID, err.Error())
+				if w.deadLetterHook != nil {
+					w.deadLetterHook(ctx, item, err)
+				}
 				continue
 			}
 			nextAttemptAt := time.Now().UTC().Add(w.retryBackoff(item.Attempts))

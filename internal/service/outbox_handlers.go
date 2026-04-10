@@ -20,8 +20,12 @@ type ReminderNotifier func(ctx context.Context, userID int64, text string) error
 func NewBookingOutboxHandler(repo repository.BookingRepository, notifier ReminderNotifier) OutboxHandler {
 	return func(ctx context.Context, event repository.OutboxEvent) error {
 		switch event.EventType {
-		case "booking_confirmed":
-			return handleBookingConfirmedEvent(ctx, repo, event)
+		case "booking_created":
+			// RFC: emitted when clinic_booking row exists; side effects are optional.
+			return nil
+		case "booking_confirmed", "payment_confirmed":
+			// payment_confirmed replaces booking_confirmed for new rows; keep alias for old outbox data.
+			return handlePaymentConfirmedEvent(ctx, repo, event)
 		case "booking_reminder_due":
 			return handleBookingReminderDueEvent(ctx, repo, notifier, event)
 		default:
@@ -30,13 +34,13 @@ func NewBookingOutboxHandler(repo repository.BookingRepository, notifier Reminde
 	}
 }
 
-func handleBookingConfirmedEvent(ctx context.Context, repo repository.BookingRepository, event repository.OutboxEvent) error {
+func handlePaymentConfirmedEvent(ctx context.Context, repo repository.BookingRepository, event repository.OutboxEvent) error {
 	var payload bookingOutboxPayload
 	if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
-		return fmt.Errorf("decode booking_confirmed payload: %w", err)
+		return fmt.Errorf("decode payment_confirmed payload: %w", err)
 	}
 	if payload.BookingID == 0 || payload.UserID == 0 || payload.SlotID == 0 {
-		return fmt.Errorf("invalid booking_confirmed payload")
+		return fmt.Errorf("invalid payment_confirmed payload")
 	}
 	slot, err := repo.GetDoctorSlotByID(ctx, payload.SlotID)
 	if err != nil {
