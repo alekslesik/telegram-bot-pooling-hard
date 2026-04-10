@@ -191,6 +191,7 @@ func TestBookingService_AdminCapabilities_ByRole(t *testing.T) {
 
 	repo.SetAdminRole(777, repository.AdminRoleOperator)
 	repo.SetAdminRole(888, repository.AdminRoleAdmin)
+	repo.SetAdminRole(999, repository.AdminRoleOwner)
 
 	svc := NewBookingService(repo, nil)
 	ctx := context.Background()
@@ -209,6 +210,14 @@ func TestBookingService_AdminCapabilities_ByRole(t *testing.T) {
 	}
 	if !adminCaps.CanOpenPanel || !adminCaps.CanManageDaySlots || !adminCaps.CanManageCatalog || !adminCaps.CanViewAnalytics {
 		t.Fatalf("unexpected admin caps: %+v", adminCaps)
+	}
+
+	ownerCaps, err := svc.AdminCapabilities(ctx, 999)
+	if err != nil {
+		t.Fatalf("owner caps error: %v", err)
+	}
+	if !ownerCaps.CanManageAdmins || !ownerCaps.CanManageBlackout || !ownerCaps.CanViewAudit {
+		t.Fatalf("unexpected owner caps: %+v", ownerCaps)
 	}
 }
 
@@ -236,6 +245,22 @@ func TestBookingService_AdminHandleText_DeniesOperatorForCatalogState(t *testing
 	}
 	if !strings.Contains(msg, "Нет доступа") {
 		t.Fatalf("expected access denied, got %q", msg)
+	}
+
+	if err := repo.SaveConversationState(ctx, repository.ConversationState{
+		TelegramUserID: 5001,
+		State:          StateAdminGenerateSlotsRange,
+		PayloadJSON:    "{}",
+		UpdatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("save state error: %v", err)
+	}
+	handled, msg, err = svc.HandleText(ctx, 5001, "1|1|2026-01-01|2026-01-02|09:00|18:00|30")
+	if err != nil {
+		t.Fatalf("handle text error: %v", err)
+	}
+	if !handled || !strings.Contains(msg, "Нет доступа") {
+		t.Fatalf("expected access denied for range state, got handled=%v msg=%q", handled, msg)
 	}
 }
 

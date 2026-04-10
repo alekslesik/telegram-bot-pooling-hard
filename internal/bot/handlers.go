@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"text/template"
@@ -15,6 +16,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/i18n"
+	"github.com/alekslesik/telegram-bot-pooling-hard/internal/repository"
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/service"
 )
 
@@ -30,7 +32,14 @@ type Handlers struct {
 	Bot         TelegramClient
 	Logger      *slog.Logger
 	Booking     *service.BookingService
+	Payments    PaymentsService
 	BotUsername string
+}
+
+type PaymentsService interface {
+	BuildTopUpInvoicePayload(userID, stars int64) (string, error)
+	ValidatePreCheckout(fromUserID int64, currency string, totalStars int64, payload string) error
+	ApplySuccessfulPayment(fromUserID int64, sp *tgbotapi.SuccessfulPayment) (repository.StarsTopUpResult, error)
 }
 
 type Command struct {
@@ -238,6 +247,11 @@ func (h Handlers) commandRegistry() map[string]Command {
 
 func (h Handlers) HandleMessage(msg *tgbotapi.Message) {
 	chatID := msg.Chat.ID
+
+	if msg.SuccessfulPayment != nil {
+		h.HandleSuccessfulPayment(msg)
+		return
+	}
 
 	if msg.IsCommand() {
 		h.HandleCommand(msg)
@@ -501,6 +515,13 @@ func (h Handlers) HandleCallback(q *tgbotapi.CallbackQuery) {
 		h.handleBookingCallback(q)
 		return
 	}
+	if strings.HasPrefix(data, "pay:") {
+		if _, err := h.Bot.Request(tgbotapi.NewCallback(q.ID, "")); err != nil {
+			h.Logger.Error("failed to answer payment callback", "err", err)
+		}
+		h.handlePaymentCallback(q)
+		return
+	}
 	if !strings.HasPrefix(data, "cmd:") {
 		if _, err := h.Bot.Request(tgbotapi.NewCallback(q.ID, "")); err != nil {
 			h.Logger.Error("failed to answer unknown callback", "err", err)
@@ -697,8 +718,8 @@ func (h Handlers) handleBookingCallback(q *tgbotapi.CallbackQuery) {
 			userID = q.From.ID
 		}
 		uidp := userID
-		payloadSlot, _ := json.Marshal(map[string]int64{"specialty_id": specID, "doctor_id": docID, "slot_id": slotID})
-		_ = h.Booking.LogAnalytics(context.Background(), &uidp, "funnel_book_slot_selected", string(payloadSlot))
+		funnelPayload, _ := json.Marshal(map[string]int64{"specialty_id": specID, "doctor_id": docID, "slot_id": slotID})
+		_ = h.Booking.LogAnalytics(context.Background(), &uidp, "funnel_book_slot_selected", string(funnelPayload))
 		lang := i18n.Ru
 		if q.From != nil {
 			stored := "ru"
@@ -708,10 +729,15 @@ func (h Handlers) handleBookingCallback(q *tgbotapi.CallbackQuery) {
 			lang = i18n.Resolve(stored, q.From.LanguageCode)
 		}
 		text, err := h.Booking.ConfirmClinicBooking(context.Background(), userID, specID, docID, slotID, lang)
+		offerTopUp := false
 		var insufficient *service.InsufficientFundsError
 		if errors.As(err, &insufficient) {
 			b := i18n.Bundle{Lang: lang}
 			text = b.InsufficientBalance(insufficient.FeeCents, insufficient.BalanceCents)
+			if h.paymentsActive() {
+				text += "\n\n" + b.PaymentTopUpPrompt()
+				offerTopUp = true
+			}
 			err = nil
 		}
 		if err != nil {
@@ -726,7 +752,106 @@ func (h Handlers) handleBookingCallback(q *tgbotapi.CallbackQuery) {
 		reply := tgbotapi.NewMessage(chatID, text)
 		reply.ReplyMarkup = commandKeyboard()
 		_, _ = h.Bot.Send(reply)
+		if offerTopUp {
+			topUp := tgbotapi.NewMessage(chatID, "⭐")
+			topUp.ReplyMarkup = starsTopUpKeyboard()
+			_, _ = h.Bot.Send(topUp)
+		}
 	}
+}
+
+func (h Handlers) HandlePreCheckout(q *tgbotapi.PreCheckoutQuery) {
+	if q == nil {
+		return
+	}
+	ok := false
+	errMsg := i18n.Bundle{Lang: i18n.Resolve("", q.From.LanguageCode)}.PaymentFailed()
+	if h.Payments != nil {
+		if err := h.Payments.ValidatePreCheckout(q.From.ID, q.Currency, int64(q.TotalAmount), q.InvoicePayload); err == nil {
+			ok = true
+			errMsg = ""
+		}
+	}
+	cfg := tgbotapi.PreCheckoutConfig{
+		PreCheckoutQueryID: q.ID,
+		OK:                 ok,
+		ErrorMessage:       errMsg,
+	}
+	if _, err := h.Bot.Request(cfg); err != nil {
+		h.Logger.Error("failed to answer pre-checkout query", "err", err)
+	}
+}
+
+func (h Handlers) HandleSuccessfulPayment(msg *tgbotapi.Message) {
+	if msg == nil || msg.SuccessfulPayment == nil {
+		return
+	}
+	b := h.bundleForUser(context.Background(), msg)
+	if h.Payments == nil {
+		reply := tgbotapi.NewMessage(msg.Chat.ID, b.PaymentFailed())
+		reply.ReplyMarkup = commandKeyboard()
+		_, _ = h.Bot.Send(reply)
+		return
+	}
+	res, err := h.Payments.ApplySuccessfulPayment(telegramUserID(msg), msg.SuccessfulPayment)
+	if err != nil {
+		h.Logger.Error("failed to apply successful payment", "err", err)
+		reply := tgbotapi.NewMessage(msg.Chat.ID, b.PaymentFailed())
+		reply.ReplyMarkup = commandKeyboard()
+		_, _ = h.Bot.Send(reply)
+		return
+	}
+	reply := tgbotapi.NewMessage(msg.Chat.ID, b.PaymentSuccess(res.BalanceAfter))
+	reply.ReplyMarkup = commandKeyboard()
+	if _, sendErr := h.Bot.Send(reply); sendErr != nil {
+		h.Logger.Error("failed to send payment success message", "err", sendErr)
+	}
+}
+
+func (h Handlers) paymentsActive() bool {
+	return h.Payments != nil && strings.EqualFold(strings.TrimSpace(os.Getenv("ONLINE_PAYMENT_MODE")), "stars")
+}
+
+func (h Handlers) handlePaymentCallback(q *tgbotapi.CallbackQuery) {
+	parts := strings.Split(strings.TrimSpace(q.Data), ":")
+	if len(parts) != 4 || parts[0] != "pay" || parts[1] != "stars" || parts[2] != "pack" || h.Payments == nil {
+		return
+	}
+	stars, err := strconv.ParseInt(parts[3], 10, 64)
+	if err != nil || stars <= 0 {
+		return
+	}
+	userID := q.Message.Chat.ID
+	if q.From != nil {
+		userID = q.From.ID
+	}
+	payload, err := h.Payments.BuildTopUpInvoicePayload(userID, stars)
+	if err != nil {
+		h.Logger.Error("failed to build stars payload", "err", err)
+		return
+	}
+	invoice := tgbotapi.NewInvoice(
+		q.Message.Chat.ID,
+		"Stars top-up",
+		"Top up wallet balance in demo credits",
+		payload,
+		"",
+		"wallet_topup",
+		"XTR",
+		[]tgbotapi.LabeledPrice{{Label: "Stars", Amount: int(stars)}},
+	)
+	if _, err := h.Bot.Send(invoice); err != nil {
+		h.Logger.Error("failed to send stars invoice", "err", err)
+	}
+}
+
+func starsTopUpKeyboard() tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⭐ Top up 10", "pay:stars:pack:10"),
+			tgbotapi.NewInlineKeyboardButtonData("⭐ Top up 25", "pay:stars:pack:25"),
+		),
+	)
 }
 
 func (h Handlers) specialtiesKeyboard(ctx context.Context, page int) *tgbotapi.InlineKeyboardMarkup {
@@ -910,12 +1035,22 @@ func (h Handlers) handleAdminCallback(q *tgbotapi.CallbackQuery) {
 		text, err = h.Booking.StartAdminLinkDoctorSpecialty(context.Background(), userID)
 	case "slots":
 		text, err = h.Booking.StartAdminGenerateSlots(context.Background(), userID)
+	case "slotsrange":
+		text, err = h.Booking.StartAdminGenerateSlotsRange(context.Background(), userID)
 	case "closeday":
 		text, err = h.Booking.StartAdminCloseDay(context.Background(), userID)
+	case "closedays":
+		text, err = h.Booking.StartAdminCloseDaysRange(context.Background(), userID)
 	case "openday":
 		text, err = h.Booking.StartAdminOpenDay(context.Background(), userID)
+	case "opendays":
+		text, err = h.Booking.StartAdminOpenDaysRange(context.Background(), userID)
 	case "dayslots":
 		text, err = h.Booking.StartAdminDaySlots(context.Background(), userID)
+	case "blackout":
+		text, err = h.Booking.StartAdminAddBlackout(context.Background(), userID)
+	case "adminupsert":
+		text, err = h.Booking.StartAdminUpsertAdmin(context.Background(), userID)
 	case "analytics":
 		days := 7
 		if len(parts) >= 3 {
@@ -923,7 +1058,7 @@ func (h Handlers) handleAdminCallback(q *tgbotapi.CallbackQuery) {
 				days = parsedDays
 			}
 		}
-		report, errAn := h.Booking.AdminAnalyticsReport(context.Background(), userID, days, nil)
+		report, errAn := h.callAdminAnalyticsReport(context.Background(), userID, days, nil)
 		err = nil
 		if errAn != nil {
 			text = "Нет доступа к аналитике."
@@ -944,7 +1079,7 @@ func (h Handlers) handleAdminCallback(q *tgbotapi.CallbackQuery) {
 		if !okDays || !okSpec || days <= 0 {
 			return
 		}
-		report, errAn := h.Booking.AdminAnalyticsReport(context.Background(), userID, days, &specialtyID)
+		report, errAn := h.callAdminAnalyticsReport(context.Background(), userID, days, &specialtyID)
 		err = nil
 		if errAn != nil {
 			text = "Нет доступа к аналитике."
@@ -993,6 +1128,9 @@ func (h Handlers) adminKeyboard(caps service.AdminCapabilities) *tgbotapi.Inline
 			tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData("Сгенерировать слоты на день", "admin:slots"),
 			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Сгенерировать слоты (диапазон)", "admin:slotsrange"),
+			),
 		)
 	}
 	if caps.CanManageDaySlots {
@@ -1005,6 +1143,26 @@ func (h Handlers) adminKeyboard(caps service.AdminCapabilities) *tgbotapi.Inline
 			),
 			tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData("Слоты на день", "admin:dayslots"),
+			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Закрыть диапазон дней", "admin:closedays"),
+			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Открыть диапазон дней", "admin:opendays"),
+			),
+		)
+	}
+	if caps.CanManageBlackout {
+		rows = append(rows,
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Добавить blackout", "admin:blackout"),
+			),
+		)
+	}
+	if caps.CanManageAdmins {
+		rows = append(rows,
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Управление админами", "admin:adminupsert"),
 			),
 		)
 	}
@@ -1027,4 +1185,45 @@ func (h Handlers) adminKeyboard(caps service.AdminCapabilities) *tgbotapi.Inline
 	)
 	inline := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	return &inline
+}
+
+func (h Handlers) callAdminAnalyticsReport(ctx context.Context, userID int64, days int, specialtyID *int64) (string, error) {
+	method := reflect.ValueOf(h.Booking).MethodByName("AdminAnalyticsReport")
+	if !method.IsValid() {
+		return "", errors.New("admin analytics method is missing")
+	}
+	if method.Type().NumIn() == 2 {
+		out := method.Call([]reflect.Value{
+			reflect.ValueOf(ctx),
+			reflect.ValueOf(userID),
+		})
+		if len(out) != 2 {
+			return "", errors.New("admin analytics method returned unexpected values")
+		}
+		report, _ := out[0].Interface().(string)
+		if out[1].IsNil() {
+			return report, nil
+		}
+		if err, ok := out[1].Interface().(error); ok {
+			return report, err
+		}
+		return report, errors.New("admin analytics method returned non-error")
+	}
+	out := method.Call([]reflect.Value{
+		reflect.ValueOf(ctx),
+		reflect.ValueOf(userID),
+		reflect.ValueOf(days),
+		reflect.ValueOf(specialtyID),
+	})
+	if len(out) != 2 {
+		return "", errors.New("admin analytics method returned unexpected values")
+	}
+	report, _ := out[0].Interface().(string)
+	if out[1].IsNil() {
+		return report, nil
+	}
+	if err, ok := out[1].Interface().(error); ok {
+		return report, err
+	}
+	return report, errors.New("admin analytics method returned non-error")
 }

@@ -186,6 +186,42 @@ const (
 	AdminRoleOperator AdminRole = "operator"
 )
 
+type AdminRecord struct {
+	TelegramUserID int64
+	Role           AdminRole
+	IsActive       bool
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+type BlackoutScope string
+
+const (
+	BlackoutScopeGlobal          BlackoutScope = "global"
+	BlackoutScopeDoctorSpecialty BlackoutScope = "doctor_specialty"
+)
+
+type BlackoutKind string
+
+const (
+	BlackoutKindBlackout BlackoutKind = "blackout"
+	BlackoutKindHoliday  BlackoutKind = "holiday"
+)
+
+type ScheduleBlackoutRule struct {
+	ID          int64
+	Scope       BlackoutScope
+	Kind        BlackoutKind
+	DoctorID    *int64
+	SpecialtyID *int64
+	StartsAt    time.Time
+	EndsAt      time.Time
+	Reason      string
+	IsActive    bool
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
 // UserProfile holds Level-3 account fields (balance, referrals, locale).
 type UserProfile struct {
 	TelegramUserID        int64
@@ -206,6 +242,12 @@ type PaidBookingResult struct {
 	SlotStart      time.Time
 	BalanceAfter   int64
 	BookingCreated time.Time
+}
+
+type StarsTopUpResult struct {
+	BalanceAfter   int64
+	CreditedCents  int64
+	AlreadyApplied bool
 }
 
 type BookingRepository interface {
@@ -237,18 +279,29 @@ type BookingRepository interface {
 
 	IsAdmin(ctx context.Context, userID int64) (bool, error)
 	GetAdminRole(ctx context.Context, userID int64) (AdminRole, error)
+	UpsertAdmin(ctx context.Context, telegramUserID int64, role AdminRole, isActive bool) (AdminRecord, error)
+	ListAdmins(ctx context.Context, includeInactive bool, limit, offset int) ([]AdminRecord, error)
+	CountAdmins(ctx context.Context, includeInactive bool) (int, error)
+	ListAdminAuditLogs(ctx context.Context, adminUserID *int64, limit, offset int) ([]AdminAuditLog, error)
 	ListAllSpecialties(ctx context.Context) ([]Specialty, error)
 	ListAllDoctors(ctx context.Context) ([]Doctor, error)
 	CreateSpecialty(ctx context.Context, name string, sortOrder int) (Specialty, error)
 	CreateDoctor(ctx context.Context, fullName string) (Doctor, error)
 	LinkDoctorToSpecialty(ctx context.Context, doctorID, specialtyID int64) error
 	GenerateDoctorSlots(ctx context.Context, doctorID, specialtyID int64, date time.Time, startMinute, endMinute, stepMinutes int) (int, error)
+	GenerateDoctorSlotsDateRange(ctx context.Context, doctorID, specialtyID int64, fromDate, toDate time.Time, startMinute, endMinute, stepMinutes int) (int, error)
 	LogAdminAction(ctx context.Context, adminUserID int64, action, details string) error
 
 	// Day tools (admin): close/open availability and view slot utilization.
 	CloseDoctorDay(ctx context.Context, doctorID, specialtyID int64, date time.Time) (int, error)
 	OpenDoctorDay(ctx context.Context, doctorID, specialtyID int64, date time.Time) (int, error)
+	CloseDoctorDaysRange(ctx context.Context, doctorID, specialtyID int64, fromDate, toDate time.Time) (int, error)
+	OpenDoctorDaysRange(ctx context.Context, doctorID, specialtyID int64, fromDate, toDate time.Time) (int, error)
 	ListDoctorSlotsForDay(ctx context.Context, doctorID, specialtyID int64, date time.Time) ([]DoctorSlotDayView, error)
+	CreateBlackoutRule(ctx context.Context, rule ScheduleBlackoutRule) (ScheduleBlackoutRule, error)
+	ListBlackoutRules(ctx context.Context, from, to time.Time, doctorID, specialtyID *int64) ([]ScheduleBlackoutRule, error)
+	DeactivateBlackoutRule(ctx context.Context, ruleID int64) error
+	IsDoctorSlotBlocked(ctx context.Context, doctorID, specialtyID int64, at time.Time) (bool, error)
 
 	GetConversationState(ctx context.Context, userID int64) (ConversationState, error)
 	SaveConversationState(ctx context.Context, state ConversationState) error
@@ -266,7 +319,9 @@ type BookingRepository interface {
 	CountNoShowProxySince(ctx context.Context, since time.Time) (int64, error)
 	CountReferralRewardsGrantedSince(ctx context.Context, since time.Time) (int64, error)
 	CountBookingsConfirmedSinceWithOptionalSpecialty(ctx context.Context, since time.Time, specialtyID *int64) (int64, error)
+	CountRetentionUsersSince(ctx context.Context, since time.Time) (int64, error)
 	ConfirmPaidClinicBooking(ctx context.Context, userID, feeCents, specialtyID, doctorID, slotID int64, operationID string) (PaidBookingResult, error)
+	ApplyTelegramStarsTopUp(ctx context.Context, userID, starsCount, kopeksPerStar int64, telegramPaymentChargeID, metadataJSON string) (StarsTopUpResult, error)
 	UpsertWalletBalanceReadModel(ctx context.Context, userID int64, balanceCents int64, lastTxID *int64) error
 	GetWalletBalanceReadModel(ctx context.Context, userID int64) (WalletBalanceReadModel, error)
 	EnqueueOutboxEvent(ctx context.Context, event OutboxEvent) (OutboxEvent, error)
@@ -299,8 +354,10 @@ type MemoryRepository struct {
 	nextDocID     int64
 
 	admins       map[int64]AdminRole
+	adminsActive map[int64]bool
 	adminLogs    []AdminAuditLog
 	nextAdminLog int64
+	adminMeta    map[int64]AdminRecord
 
 	userProfiles       map[int64]UserProfile
 	analyticsEvents    []memoryAnalyticsEvent
@@ -312,6 +369,8 @@ type MemoryRepository struct {
 	outboxEvents       map[int64]OutboxEvent
 	nextOutboxID       int64
 	clinicRefundPolicy ClinicBookingRefundPolicy
+	blackoutRules      map[int64]ScheduleBlackoutRule
+	nextBlackoutRuleID int64
 }
 
 type memoryAnalyticsEvent struct {
@@ -387,8 +446,10 @@ func NewMemoryRepository() *MemoryRepository {
 		nextClinicID:       1,
 		nextDocID:          1,
 		admins:             make(map[int64]AdminRole),
+		adminsActive:       make(map[int64]bool),
 		adminLogs:          []AdminAuditLog{},
 		nextAdminLog:       1,
+		adminMeta:          make(map[int64]AdminRecord),
 		userProfiles:       make(map[int64]UserProfile),
 		analyticsEvents:    []memoryAnalyticsEvent{},
 		nextAnalyticID:     1,
@@ -399,6 +460,8 @@ func NewMemoryRepository() *MemoryRepository {
 		outboxEvents:       make(map[int64]OutboxEvent),
 		nextOutboxID:       1,
 		clinicRefundPolicy: DefaultClinicBookingRefundPolicy(),
+		blackoutRules:      make(map[int64]ScheduleBlackoutRule),
+		nextBlackoutRuleID: 1,
 	}
 	r.seed()
 	return r
@@ -473,6 +536,15 @@ func (r *MemoryRepository) seed() {
 
 	// Default admin for local/in-memory runs.
 	r.admins[892122714] = AdminRoleAdmin
+	r.adminsActive[892122714] = true
+	nowMeta := time.Now().UTC()
+	r.adminMeta[892122714] = AdminRecord{
+		TelegramUserID: 892122714,
+		Role:           AdminRoleAdmin,
+		IsActive:       true,
+		CreatedAt:      nowMeta,
+		UpdatedAt:      nowMeta,
+	}
 }
 
 func (r *MemoryRepository) ListActiveServices(_ context.Context) ([]Service, error) {
@@ -747,15 +819,15 @@ func (r *MemoryRepository) ListRecentUserDocuments(_ context.Context, userID int
 func (r *MemoryRepository) IsAdmin(_ context.Context, userID int64) (bool, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	_, ok := r.admins[userID]
-	return ok, nil
+	role, ok := r.admins[userID]
+	return ok && role != "" && r.adminsActive[userID], nil
 }
 
 func (r *MemoryRepository) GetAdminRole(_ context.Context, userID int64) (AdminRole, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	role, ok := r.admins[userID]
-	if !ok {
+	if !ok || !r.adminsActive[userID] {
 		return "", ErrNotFound
 	}
 	return role, nil
@@ -767,9 +839,84 @@ func (r *MemoryRepository) SetAdminRole(userID int64, role AdminRole) {
 	role = AdminRole(strings.TrimSpace(string(role)))
 	if role == "" {
 		delete(r.admins, userID)
+		delete(r.adminsActive, userID)
+		delete(r.adminMeta, userID)
 		return
 	}
 	r.admins[userID] = role
+	r.adminsActive[userID] = true
+	now := time.Now().UTC()
+	rec, ok := r.adminMeta[userID]
+	if !ok {
+		rec.CreatedAt = now
+		rec.TelegramUserID = userID
+	}
+	rec.Role = role
+	rec.IsActive = true
+	rec.UpdatedAt = now
+	r.adminMeta[userID] = rec
+}
+
+func (r *MemoryRepository) UpsertAdmin(_ context.Context, telegramUserID int64, role AdminRole, isActive bool) (AdminRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	role = AdminRole(strings.TrimSpace(string(role)))
+	if role == "" {
+		return AdminRecord{}, ErrNotFound
+	}
+	r.admins[telegramUserID] = role
+	r.adminsActive[telegramUserID] = isActive
+	now := time.Now().UTC()
+	rec, ok := r.adminMeta[telegramUserID]
+	if !ok {
+		rec.CreatedAt = now
+		rec.TelegramUserID = telegramUserID
+	}
+	rec.Role = role
+	rec.IsActive = isActive
+	rec.UpdatedAt = now
+	r.adminMeta[telegramUserID] = rec
+	return rec, nil
+}
+
+func (r *MemoryRepository) ListAdmins(_ context.Context, includeInactive bool, limit, offset int) ([]AdminRecord, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]AdminRecord, 0, len(r.adminMeta))
+	for _, rec := range r.adminMeta {
+		if !includeInactive && !rec.IsActive {
+			continue
+		}
+		out = append(out, rec)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Role == out[j].Role {
+			return out[i].TelegramUserID < out[j].TelegramUserID
+		}
+		return out[i].Role < out[j].Role
+	})
+	start, end := pageBounds(len(out), limit, offset)
+	return append([]AdminRecord(nil), out[start:end]...), nil
+}
+
+func (r *MemoryRepository) CountAdmins(_ context.Context, includeInactive bool) (int, error) {
+	items, err := r.ListAdmins(context.Background(), includeInactive, 0, 0)
+	return len(items), err
+}
+
+func (r *MemoryRepository) ListAdminAuditLogs(_ context.Context, adminUserID *int64, limit, offset int) ([]AdminAuditLog, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]AdminAuditLog, 0, len(r.adminLogs))
+	for i := len(r.adminLogs) - 1; i >= 0; i-- {
+		item := r.adminLogs[i]
+		if adminUserID != nil && item.AdminUserID != *adminUserID {
+			continue
+		}
+		out = append(out, item)
+	}
+	start, end := pageBounds(len(out), limit, offset)
+	return append([]AdminAuditLog(nil), out[start:end]...), nil
 }
 
 func (r *MemoryRepository) ListAllSpecialties(_ context.Context) ([]Specialty, error) {
@@ -879,6 +1026,9 @@ func (r *MemoryRepository) GenerateDoctorSlots(_ context.Context, doctorID, spec
 
 	for m := startMinute; m < endMinute; m += stepMinutes {
 		at := base.Add(time.Duration(m) * time.Minute)
+		if r.isDoctorSlotBlockedLocked(doctorID, specialtyID, at) {
+			continue
+		}
 		already := false
 		for _, s := range r.doctorSlots {
 			if s.DoctorID == doctorID && s.SpecialtyID == specialtyID && s.StartAt.Equal(at) {
@@ -901,6 +1051,21 @@ func (r *MemoryRepository) GenerateDoctorSlots(_ context.Context, doctorID, spec
 	}
 
 	return inserted, nil
+}
+
+func (r *MemoryRepository) GenerateDoctorSlotsDateRange(ctx context.Context, doctorID, specialtyID int64, fromDate, toDate time.Time, startMinute, endMinute, stepMinutes int) (int, error) {
+	if toDate.Before(fromDate) {
+		return 0, nil
+	}
+	total := 0
+	for day := time.Date(fromDate.Year(), fromDate.Month(), fromDate.Day(), 0, 0, 0, 0, time.UTC); !day.After(time.Date(toDate.Year(), toDate.Month(), toDate.Day(), 0, 0, 0, 0, time.UTC)); day = day.AddDate(0, 0, 1) {
+		inserted, err := r.GenerateDoctorSlots(ctx, doctorID, specialtyID, day, startMinute, endMinute, stepMinutes)
+		if err != nil {
+			return total, err
+		}
+		total += inserted
+	}
+	return total, nil
 }
 
 func (r *MemoryRepository) CloseDoctorDay(_ context.Context, doctorID, specialtyID int64, date time.Time) (int, error) {
@@ -954,14 +1119,44 @@ func (r *MemoryRepository) OpenDoctorDay(_ context.Context, doctorID, specialtyI
 			continue
 		}
 
-		if !slot.IsAvailable {
+		if !slot.IsAvailable && !r.isDoctorSlotBlockedLocked(doctorID, specialtyID, slot.StartAt) {
 			updated++
 		}
-		slot.IsAvailable = true
+		slot.IsAvailable = !r.isDoctorSlotBlockedLocked(doctorID, specialtyID, slot.StartAt)
 		r.doctorSlots[id] = slot
 	}
 
 	return updated, nil
+}
+
+func (r *MemoryRepository) CloseDoctorDaysRange(ctx context.Context, doctorID, specialtyID int64, fromDate, toDate time.Time) (int, error) {
+	if toDate.Before(fromDate) {
+		return 0, nil
+	}
+	total := 0
+	for day := time.Date(fromDate.Year(), fromDate.Month(), fromDate.Day(), 0, 0, 0, 0, time.UTC); !day.After(time.Date(toDate.Year(), toDate.Month(), toDate.Day(), 0, 0, 0, 0, time.UTC)); day = day.AddDate(0, 0, 1) {
+		updated, err := r.CloseDoctorDay(ctx, doctorID, specialtyID, day)
+		if err != nil {
+			return total, err
+		}
+		total += updated
+	}
+	return total, nil
+}
+
+func (r *MemoryRepository) OpenDoctorDaysRange(ctx context.Context, doctorID, specialtyID int64, fromDate, toDate time.Time) (int, error) {
+	if toDate.Before(fromDate) {
+		return 0, nil
+	}
+	total := 0
+	for day := time.Date(fromDate.Year(), fromDate.Month(), fromDate.Day(), 0, 0, 0, 0, time.UTC); !day.After(time.Date(toDate.Year(), toDate.Month(), toDate.Day(), 0, 0, 0, 0, time.UTC)); day = day.AddDate(0, 0, 1) {
+		updated, err := r.OpenDoctorDay(ctx, doctorID, specialtyID, day)
+		if err != nil {
+			return total, err
+		}
+		total += updated
+	}
+	return total, nil
 }
 
 func (r *MemoryRepository) ListDoctorSlotsForDay(_ context.Context, doctorID, specialtyID int64, date time.Time) ([]DoctorSlotDayView, error) {
@@ -1013,6 +1208,95 @@ func (r *MemoryRepository) LogAdminAction(_ context.Context, adminUserID int64, 
 	})
 	r.nextAdminLog++
 	return nil
+}
+
+func (r *MemoryRepository) CreateBlackoutRule(_ context.Context, rule ScheduleBlackoutRule) (ScheduleBlackoutRule, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !rule.EndsAt.After(rule.StartsAt) {
+		return ScheduleBlackoutRule{}, ErrNotFound
+	}
+	if rule.Scope == "" {
+		rule.Scope = BlackoutScopeDoctorSpecialty
+	}
+	if rule.Kind == "" {
+		rule.Kind = BlackoutKindBlackout
+	}
+	now := time.Now().UTC()
+	rule.ID = r.nextBlackoutRuleID
+	r.nextBlackoutRuleID++
+	rule.IsActive = true
+	rule.CreatedAt = now
+	rule.UpdatedAt = now
+	r.blackoutRules[rule.ID] = rule
+	return rule, nil
+}
+
+func (r *MemoryRepository) ListBlackoutRules(_ context.Context, from, to time.Time, doctorID, specialtyID *int64) ([]ScheduleBlackoutRule, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]ScheduleBlackoutRule, 0, len(r.blackoutRules))
+	for _, item := range r.blackoutRules {
+		if !item.IsActive {
+			continue
+		}
+		if !to.IsZero() && !item.StartsAt.Before(to) {
+			continue
+		}
+		if !from.IsZero() && !item.EndsAt.After(from) {
+			continue
+		}
+		if doctorID != nil {
+			if item.DoctorID == nil || *item.DoctorID != *doctorID {
+				continue
+			}
+		}
+		if specialtyID != nil {
+			if item.SpecialtyID == nil || *item.SpecialtyID != *specialtyID {
+				continue
+			}
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].StartsAt.Before(out[j].StartsAt) })
+	return out, nil
+}
+
+func (r *MemoryRepository) DeactivateBlackoutRule(_ context.Context, ruleID int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	item, ok := r.blackoutRules[ruleID]
+	if !ok {
+		return ErrNotFound
+	}
+	item.IsActive = false
+	item.UpdatedAt = time.Now().UTC()
+	r.blackoutRules[ruleID] = item
+	return nil
+}
+
+func (r *MemoryRepository) IsDoctorSlotBlocked(_ context.Context, doctorID, specialtyID int64, at time.Time) (bool, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.isDoctorSlotBlockedLocked(doctorID, specialtyID, at), nil
+}
+
+func (r *MemoryRepository) isDoctorSlotBlockedLocked(doctorID, specialtyID int64, at time.Time) bool {
+	for _, rule := range r.blackoutRules {
+		if !rule.IsActive {
+			continue
+		}
+		if at.Before(rule.StartsAt) || !at.Before(rule.EndsAt) {
+			continue
+		}
+		if rule.Scope == BlackoutScopeGlobal {
+			return true
+		}
+		if rule.DoctorID != nil && rule.SpecialtyID != nil && *rule.DoctorID == doctorID && *rule.SpecialtyID == specialtyID {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *MemoryRepository) GetConversationState(_ context.Context, userID int64) (ConversationState, error) {
@@ -1132,7 +1416,7 @@ func (r *MemoryRepository) ListAvailableDoctorSlots(_ context.Context, specialty
 	defer r.mu.RUnlock()
 	var out []DoctorSlot
 	for _, s := range r.doctorSlots {
-		if s.SpecialtyID == specialtyID && s.DoctorID == doctorID && s.IsAvailable {
+		if s.SpecialtyID == specialtyID && s.DoctorID == doctorID && s.IsAvailable && !r.isDoctorSlotBlockedLocked(doctorID, specialtyID, s.StartAt) {
 			out = append(out, s)
 		}
 	}
@@ -1380,12 +1664,10 @@ func (r *MemoryRepository) CountClinicBookingsCancelledSince(_ context.Context, 
 	defer r.mu.RUnlock()
 	var count int64
 	for _, b := range r.clinicBooking {
-		if b.Status != "cancelled" || b.CancelledAt == nil {
+		if b.Status != "cancelled" || b.CancelledAt == nil || b.CancelledAt.Before(since) {
 			continue
 		}
-		if !b.CancelledAt.Before(since) {
-			count++
-		}
+		count++
 	}
 	return count, nil
 }
@@ -1436,6 +1718,33 @@ func (r *MemoryRepository) CountBookingsConfirmedSinceWithOptionalSpecialty(_ co
 		count++
 	}
 	return count, nil
+}
+
+func (r *MemoryRepository) CountRetentionUsersSince(_ context.Context, since time.Time) (int64, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	started := make(map[int64]struct{})
+	confirmed := make(map[int64]struct{})
+	for _, e := range r.analyticsEvents {
+		if e.CreatedAt.Before(since) || e.UserID == nil {
+			continue
+		}
+		switch e.EventType {
+		case "cmd_start":
+			started[*e.UserID] = struct{}{}
+		case "booking_confirmed":
+			confirmed[*e.UserID] = struct{}{}
+		}
+	}
+
+	var retention int64
+	for userID := range started {
+		if _, ok := confirmed[userID]; ok {
+			retention++
+		}
+	}
+	return retention, nil
 }
 
 func (r *MemoryRepository) ConfirmPaidClinicBooking(_ context.Context, userID, feeCents, specialtyID, doctorID, slotID int64, operationID string) (PaidBookingResult, error) {
@@ -1493,7 +1802,7 @@ func (r *MemoryRepository) ConfirmPaidClinicBooking(_ context.Context, userID, f
 	}
 
 	slot, ok := r.doctorSlots[slotID]
-	if !ok || !slot.IsAvailable || slot.DoctorID != doctorID || slot.SpecialtyID != specialtyID {
+	if !ok || !slot.IsAvailable || slot.DoctorID != doctorID || slot.SpecialtyID != specialtyID || r.isDoctorSlotBlockedLocked(doctorID, specialtyID, slot.StartAt) {
 		return PaidBookingResult{}, ErrNotFound
 	}
 
@@ -1561,6 +1870,93 @@ func (r *MemoryRepository) ConfirmPaidClinicBooking(_ context.Context, userID, f
 		SlotStart:      slot.StartAt,
 		BalanceAfter:   p.BalanceCents,
 		BookingCreated: booking.CreatedAt,
+	}, nil
+}
+
+func (r *MemoryRepository) ApplyTelegramStarsTopUp(_ context.Context, userID, starsCount, kopeksPerStar int64, telegramPaymentChargeID, metadataJSON string) (StarsTopUpResult, error) {
+	chargeID := strings.TrimSpace(telegramPaymentChargeID)
+	if chargeID == "" {
+		return StarsTopUpResult{}, fmt.Errorf("telegram payment charge id is required")
+	}
+
+	operationID := "tg_stars:" + chargeID
+	creditedCents := starsCount * kopeksPerStar
+	metadataJSON = strings.TrimSpace(metadataJSON)
+	if metadataJSON == "" {
+		metadataJSON = "{}"
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if txID, ok := r.walletTxByOp[operationID]; ok {
+		tx, hasTx := r.walletTx[txID]
+		if hasTx {
+			return StarsTopUpResult{
+				BalanceAfter:   tx.BalanceAfter,
+				CreditedCents:  tx.AmountCents,
+				AlreadyApplied: true,
+			}, nil
+		}
+	}
+
+	p, ok := r.userProfiles[userID]
+	if !ok {
+		for {
+			code, err := randomReferralCode()
+			if err != nil {
+				return StarsTopUpResult{}, err
+			}
+			if r.referralCodeTakenLocked(code) {
+				continue
+			}
+			now := time.Now().UTC()
+			p = UserProfile{
+				TelegramUserID:        userID,
+				BalanceCents:          500,
+				ReferralCode:          code,
+				PreferredLang:         "ru",
+				ReferralRewardGranted: false,
+				CreatedAt:             now,
+				UpdatedAt:             now,
+			}
+			r.userProfiles[userID] = p
+			break
+		}
+	}
+
+	before := p.BalanceCents
+	p.BalanceCents += creditedCents
+	p.UpdatedAt = time.Now().UTC()
+	r.userProfiles[userID] = p
+
+	wtx := WalletTransaction{
+		ID:               r.nextWalletTxID,
+		TelegramUserID:   userID,
+		OperationID:      operationID,
+		TxType:           "credit",
+		AmountCents:      creditedCents,
+		BalanceBefore:    before,
+		BalanceAfter:     p.BalanceCents,
+		RelatedBookingID: nil,
+		MetadataJSON:     metadataJSON,
+		CreatedAt:        p.UpdatedAt,
+	}
+	r.walletTx[wtx.ID] = wtx
+	r.walletTxByOp[operationID] = wtx.ID
+	r.nextWalletTxID++
+	wtxID := wtx.ID
+	r.walletReadModel[userID] = WalletBalanceReadModel{
+		TelegramUserID: userID,
+		BalanceCents:   p.BalanceCents,
+		LastTxID:       &wtxID,
+		UpdatedAt:      p.UpdatedAt,
+	}
+
+	return StarsTopUpResult{
+		BalanceAfter:   p.BalanceCents,
+		CreditedCents:  creditedCents,
+		AlreadyApplied: false,
 	}, nil
 }
 
