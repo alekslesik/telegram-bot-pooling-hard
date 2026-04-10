@@ -1,0 +1,6 @@
+# PR Conflict Check And Fix
+
+- Before updating or merging a PR, always check merge state for conflicts against the base branch.
+- If conflicts exist, update from base branch and resolve conflicts immediately.
+- Prefer safe conflict resolution that preserves both sides' intended behavior; re-run relevant tests after resolution.
+- Push resolved changes to the same PR branch so the PR is always merge-ready.
