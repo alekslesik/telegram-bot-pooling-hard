@@ -38,6 +38,51 @@ func (r *PostgresRepository) SetClinicBookingRefundPolicy(policy ClinicBookingRe
 	return nil
 }
 
+func (r *PostgresRepository) SetClinicBookingRefundPolicyForSpecialty(ctx context.Context, specialtyID *int64, policy ClinicBookingRefundPolicy) error {
+	normalized, err := NormalizeClinicBookingRefundPolicy(policy)
+	if err != nil {
+		return err
+	}
+	if specialtyID == nil {
+		r.clinicRefundPolicy = normalized
+	}
+	_, err = r.db.ExecContext(ctx, `
+		INSERT INTO clinic_refund_policies (specialty_id, partial_window_seconds, partial_percent, updated_at)
+		VALUES ($1, $2, $3, NOW())
+		ON CONFLICT (specialty_id) WHERE specialty_id IS NOT NULL
+		DO UPDATE SET partial_window_seconds = EXCLUDED.partial_window_seconds,
+		              partial_percent = EXCLUDED.partial_percent,
+		              updated_at = NOW()`,
+		specialtyID, int64(normalized.PartialWindow.Seconds()), normalized.PartialPercent)
+	if err == nil && specialtyID == nil {
+		_, err = r.db.ExecContext(ctx, `
+			INSERT INTO clinic_refund_policies (specialty_id, partial_window_seconds, partial_percent, updated_at)
+			VALUES (NULL, $1, $2, NOW())
+			ON CONFLICT ((specialty_id IS NULL)) WHERE specialty_id IS NULL
+			DO UPDATE SET partial_window_seconds = EXCLUDED.partial_window_seconds,
+			              partial_percent = EXCLUDED.partial_percent,
+			              updated_at = NOW()`,
+			int64(normalized.PartialWindow.Seconds()), normalized.PartialPercent)
+	}
+	if err != nil {
+		return err
+	}
+	_, err = r.db.ExecContext(ctx, `
+		INSERT INTO clinic_refund_policy_audit_log (specialty_id, partial_window_seconds, partial_percent)
+		VALUES ($1, $2, $3)`,
+		specialtyID, int64(normalized.PartialWindow.Seconds()), normalized.PartialPercent)
+	return err
+}
+
+func (r *PostgresRepository) GetClinicBookingRefundPolicyForSpecialty(ctx context.Context, specialtyID int64) (ClinicBookingRefundPolicy, error) {
+	if policy, ok, err := r.loadClinicBookingRefundPolicy(ctx, nil, specialtyID); err != nil {
+		return ClinicBookingRefundPolicy{}, err
+	} else if ok {
+		return policy, nil
+	}
+	return r.clinicRefundPolicy, nil
+}
+
 func (r *PostgresRepository) ListActiveServices(ctx context.Context) ([]Service, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, name, duration_min, is_active
@@ -476,12 +521,13 @@ func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bo
 	}()
 
 	var slotID int64
+	var specialtyID int64
 	var status string
 	err = tx.QueryRowContext(ctx, `
-		SELECT doctor_slot_id, status
+		SELECT doctor_slot_id, specialty_id, status
 		FROM clinic_bookings
 		WHERE id = $1 AND telegram_user_id = $2
-		FOR UPDATE`, bookingID, userID).Scan(&slotID, &status)
+		FOR UPDATE`, bookingID, userID).Scan(&slotID, &specialtyID, &status)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CancelClinicBookingResult{}, ErrNotFound
 	}
@@ -544,7 +590,14 @@ func (r *PostgresRepository) CancelClinicBooking(ctx context.Context, userID, bo
 			return CancelClinicBookingResult{}, err
 		}
 		if debitAmount < 0 {
-			refunded, refundIsPartial, refundBlockedByPolicy = calculateClinicBookingRefund(r.clinicRefundPolicy, debitAmount, time.Now().UTC(), slotStart)
+			policy, _, err := r.loadClinicBookingRefundPolicy(ctx, tx, specialtyID)
+			if err != nil {
+				return CancelClinicBookingResult{}, err
+			}
+			if policy.PartialWindow == 0 {
+				policy = r.clinicRefundPolicy
+			}
+			refunded, refundIsPartial, refundBlockedByPolicy = calculateClinicBookingRefund(policy, debitAmount, time.Now().UTC(), slotStart)
 			if refunded <= 0 {
 				// policy blocked or zero refund, nothing to write
 			} else {
@@ -2053,6 +2106,51 @@ func (r *PostgresRepository) upsertWalletBalanceReadModelTx(ctx context.Context,
 		    last_tx_id = EXCLUDED.last_tx_id,
 		    updated_at = NOW()`, userID, balanceCents, lastTxID)
 	return err
+}
+
+func (r *PostgresRepository) loadClinicBookingRefundPolicy(ctx context.Context, tx *sql.Tx, specialtyID int64) (ClinicBookingRefundPolicy, bool, error) {
+	queryOne := func(query string, args ...any) (ClinicBookingRefundPolicy, bool, error) {
+		var (
+			windowSec int64
+			percent   int64
+			err       error
+		)
+		if tx != nil {
+			err = tx.QueryRowContext(ctx, query, args...).Scan(&windowSec, &percent)
+		} else {
+			err = r.db.QueryRowContext(ctx, query, args...).Scan(&windowSec, &percent)
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			return ClinicBookingRefundPolicy{}, false, nil
+		}
+		if err != nil {
+			return ClinicBookingRefundPolicy{}, false, err
+		}
+		p, err := NormalizeClinicBookingRefundPolicy(ClinicBookingRefundPolicy{
+			PartialWindow:  time.Duration(windowSec) * time.Second,
+			PartialPercent: percent,
+		})
+		if err != nil {
+			return ClinicBookingRefundPolicy{}, false, err
+		}
+		return p, true, nil
+	}
+
+	if p, ok, err := queryOne(`
+		SELECT partial_window_seconds, partial_percent
+		FROM clinic_refund_policies
+		WHERE specialty_id = $1
+		ORDER BY id DESC
+		LIMIT 1`, specialtyID); err != nil || ok {
+		return p, ok, err
+	}
+
+	return queryOne(`
+		SELECT partial_window_seconds, partial_percent
+		FROM clinic_refund_policies
+		WHERE specialty_id IS NULL
+		ORDER BY id DESC
+		LIMIT 1`)
 }
 
 func nullIfZeroTime(t time.Time) any {
