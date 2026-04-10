@@ -317,3 +317,86 @@ func TestBookingService_CancelClinicBooking_PolicyBlockedMessage(t *testing.T) {
 		t.Fatalf("expected policy blocked message, got %q", msg)
 	}
 }
+
+func TestBookingService_AdminListAdmins_OwnerOnly(t *testing.T) {
+	repo := repository.NewMemoryRepository()
+	svc := NewBookingService(repo, nil)
+	ctx := context.Background()
+	repo.SetAdminRole(9001, repository.AdminRoleOwner)
+	repo.SetAdminRole(9002, repository.AdminRoleAdmin)
+
+	text, err := svc.AdminListAdmins(ctx, 9001, true, 10)
+	if err != nil {
+		t.Fatalf("owner list admins error: %v", err)
+	}
+	if !strings.Contains(text, "Админы:") {
+		t.Fatalf("unexpected owner list text: %q", text)
+	}
+	denied, err := svc.AdminListAdmins(ctx, 9002, true, 10)
+	if err != nil {
+		t.Fatalf("admin list admins error: %v", err)
+	}
+	if !strings.Contains(denied, "Нет доступа") {
+		t.Fatalf("expected denied for non-owner, got %q", denied)
+	}
+}
+
+func TestBookingService_AdminBlackoutListAndDeactivate(t *testing.T) {
+	repo := repository.NewMemoryRepository()
+	svc := NewBookingService(repo, nil)
+	ctx := context.Background()
+	repo.SetAdminRole(9101, repository.AdminRoleOwner)
+
+	doctorID, specialtyID := int64(1), int64(1)
+	rule, err := repo.CreateBlackoutRule(ctx, repository.ScheduleBlackoutRule{
+		Scope:       repository.BlackoutScopeDoctorSpecialty,
+		Kind:        repository.BlackoutKindBlackout,
+		DoctorID:    &doctorID,
+		SpecialtyID: &specialtyID,
+		StartsAt:    time.Now().UTC().Add(1 * time.Hour),
+		EndsAt:      time.Now().UTC().Add(2 * time.Hour),
+		Reason:      "maintenance",
+	})
+	if err != nil {
+		t.Fatalf("create blackout error: %v", err)
+	}
+
+	listText, err := svc.AdminListBlackouts(ctx, 9101, 10)
+	if err != nil {
+		t.Fatalf("list blackouts error: %v", err)
+	}
+	if !strings.Contains(listText, "id=") {
+		t.Fatalf("expected blackout id in list, got %q", listText)
+	}
+	msg, err := svc.AdminDeactivateBlackout(ctx, 9101, rule.ID)
+	if err != nil {
+		t.Fatalf("deactivate blackout error: %v", err)
+	}
+	if !strings.Contains(msg, "деактивировано") {
+		t.Fatalf("unexpected deactivate message: %q", msg)
+	}
+}
+
+func TestBookingService_AdminAuditTail_OwnerOnly(t *testing.T) {
+	repo := repository.NewMemoryRepository()
+	svc := NewBookingService(repo, nil)
+	ctx := context.Background()
+	repo.SetAdminRole(9201, repository.AdminRoleOwner)
+	repo.SetAdminRole(9202, repository.AdminRoleOperator)
+	_ = repo.LogAdminAction(ctx, 9201, "test_action", `{"ok":true}`)
+
+	ownerText, err := svc.AdminAuditTail(ctx, 9201, 10)
+	if err != nil {
+		t.Fatalf("owner audit tail error: %v", err)
+	}
+	if !strings.Contains(ownerText, "audit") {
+		t.Fatalf("expected audit output for owner, got %q", ownerText)
+	}
+	deniedText, err := svc.AdminAuditTail(ctx, 9202, 10)
+	if err != nil {
+		t.Fatalf("operator audit tail error: %v", err)
+	}
+	if !strings.Contains(deniedText, "Нет доступа") {
+		t.Fatalf("expected denied for operator, got %q", deniedText)
+	}
+}

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"reflect"
 	"strconv"
 	"strings"
 	"text/template"
@@ -1049,8 +1048,24 @@ func (h Handlers) handleAdminCallback(q *tgbotapi.CallbackQuery) {
 		text, err = h.Booking.StartAdminDaySlots(context.Background(), userID)
 	case "blackout":
 		text, err = h.Booking.StartAdminAddBlackout(context.Background(), userID)
+	case "blackouts":
+		text, err = h.Booking.AdminListBlackouts(context.Background(), userID, 30)
+	case "blackoutoff":
+		if len(parts) >= 3 {
+			if ruleID, ok := parseInt64(parts[2]); ok {
+				text, err = h.Booking.AdminDeactivateBlackout(context.Background(), userID, ruleID)
+			} else {
+				text = "Неверный rule_id."
+			}
+		} else {
+			text = "Неверный формат."
+		}
 	case "adminupsert":
 		text, err = h.Booking.StartAdminUpsertAdmin(context.Background(), userID)
+	case "admins":
+		text, err = h.Booking.AdminListAdmins(context.Background(), userID, true, 50)
+	case "audit":
+		text, err = h.Booking.AdminAuditTail(context.Background(), userID, 30)
 	case "analytics":
 		days := 7
 		if len(parts) >= 3 {
@@ -1058,7 +1073,7 @@ func (h Handlers) handleAdminCallback(q *tgbotapi.CallbackQuery) {
 				days = parsedDays
 			}
 		}
-		report, errAn := h.callAdminAnalyticsReport(context.Background(), userID, days, nil)
+		report, errAn := h.Booking.AdminAnalyticsReport(context.Background(), userID, days, nil)
 		err = nil
 		if errAn != nil {
 			text = "Нет доступа к аналитике."
@@ -1079,7 +1094,7 @@ func (h Handlers) handleAdminCallback(q *tgbotapi.CallbackQuery) {
 		if !okDays || !okSpec || days <= 0 {
 			return
 		}
-		report, errAn := h.callAdminAnalyticsReport(context.Background(), userID, days, &specialtyID)
+		report, errAn := h.Booking.AdminAnalyticsReport(context.Background(), userID, days, &specialtyID)
 		err = nil
 		if errAn != nil {
 			text = "Нет доступа к аналитике."
@@ -1157,12 +1172,25 @@ func (h Handlers) adminKeyboard(caps service.AdminCapabilities) *tgbotapi.Inline
 			tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData("Добавить blackout", "admin:blackout"),
 			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Список blackout", "admin:blackouts"),
+			),
 		)
 	}
 	if caps.CanManageAdmins {
 		rows = append(rows,
 			tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData("Управление админами", "admin:adminupsert"),
+			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Список админов", "admin:admins"),
+			),
+		)
+	}
+	if caps.CanViewAudit {
+		rows = append(rows,
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Audit tail", "admin:audit"),
 			),
 		)
 	}
@@ -1185,45 +1213,4 @@ func (h Handlers) adminKeyboard(caps service.AdminCapabilities) *tgbotapi.Inline
 	)
 	inline := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	return &inline
-}
-
-func (h Handlers) callAdminAnalyticsReport(ctx context.Context, userID int64, days int, specialtyID *int64) (string, error) {
-	method := reflect.ValueOf(h.Booking).MethodByName("AdminAnalyticsReport")
-	if !method.IsValid() {
-		return "", errors.New("admin analytics method is missing")
-	}
-	if method.Type().NumIn() == 2 {
-		out := method.Call([]reflect.Value{
-			reflect.ValueOf(ctx),
-			reflect.ValueOf(userID),
-		})
-		if len(out) != 2 {
-			return "", errors.New("admin analytics method returned unexpected values")
-		}
-		report, _ := out[0].Interface().(string)
-		if out[1].IsNil() {
-			return report, nil
-		}
-		if err, ok := out[1].Interface().(error); ok {
-			return report, err
-		}
-		return report, errors.New("admin analytics method returned non-error")
-	}
-	out := method.Call([]reflect.Value{
-		reflect.ValueOf(ctx),
-		reflect.ValueOf(userID),
-		reflect.ValueOf(days),
-		reflect.ValueOf(specialtyID),
-	})
-	if len(out) != 2 {
-		return "", errors.New("admin analytics method returned unexpected values")
-	}
-	report, _ := out[0].Interface().(string)
-	if out[1].IsNil() {
-		return report, nil
-	}
-	if err, ok := out[1].Interface().(error); ok {
-		return report, err
-	}
-	return report, errors.New("admin analytics method returned non-error")
 }

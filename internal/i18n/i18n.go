@@ -105,15 +105,6 @@ func (b Bundle) AnalyticsAdmin(lines []string) string {
 	}
 }
 
-func (b Bundle) NoAnalytics() string {
-	switch b.Lang {
-	case En:
-		return "No analytics events in this period."
-	default:
-		return "За этот период событий нет."
-	}
-}
-
 func (b Bundle) PaymentSuccess(balanceCents int64) string {
 	switch b.Lang {
 	case En:
@@ -138,5 +129,14 @@ func (b Bundle) PaymentTopUpPrompt() string {
 		return "Need more funds? Top up via Telegram Stars and repeat booking."
 	default:
 		return "Нужно пополнение? Пополните баланс через Telegram Stars и повторите запись."
+	}
+}
+
+func (b Bundle) NoAnalytics() string {
+	switch b.Lang {
+	case En:
+		return "No analytics events in this period."
+	default:
+		return "За этот период событий нет."
 	}
 }

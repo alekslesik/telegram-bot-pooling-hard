@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -208,6 +209,7 @@ func TestAdminKeyboard_VisibilityByCapabilities(t *testing.T) {
 		CanViewAnalytics:  true,
 		CanManageAdmins:   true,
 		CanManageBlackout: true,
+		CanViewAudit:      true,
 	}
 	keyboard := h.adminKeyboard(owner)
 	var data []string
@@ -219,7 +221,7 @@ func TestAdminKeyboard_VisibilityByCapabilities(t *testing.T) {
 		}
 	}
 	joined := strings.Join(data, ",")
-	for _, expected := range []string{"admin:slotsrange", "admin:closedays", "admin:opendays", "admin:blackout", "admin:adminupsert"} {
+	for _, expected := range []string{"admin:slotsrange", "admin:closedays", "admin:opendays", "admin:blackout", "admin:blackouts", "admin:adminupsert", "admin:admins", "admin:audit"} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("expected callback %s in keyboard, got %s", expected, joined)
 		}
@@ -619,5 +621,102 @@ func TestHandlers_HandleAdminCallback_AnalyticsSegment(t *testing.T) {
 	}
 	if !strings.Contains(cfg.Text, "segment: specialty_id=2") {
 		t.Fatalf("expected segmented analytics report, got %q", cfg.Text)
+	}
+}
+
+func TestHandlers_HandleAdminCallback_AdminsList(t *testing.T) {
+	fb := &fakeBot{}
+	repo := repository.NewMemoryRepository()
+	h := newTestHandlers(fb)
+	h.Booking = service.NewBookingService(repo, nil)
+	repo.SetAdminRole(901, repository.AdminRoleOwner)
+
+	h.handleAdminCallback(&tgbotapi.CallbackQuery{
+		Data: "admin:admins",
+		Message: &tgbotapi.Message{
+			Chat: &tgbotapi.Chat{ID: 10},
+		},
+		From: &tgbotapi.User{ID: 901},
+	})
+	cfg, ok := fb.last.(tgbotapi.MessageConfig)
+	if !ok {
+		t.Fatalf("expected MessageConfig, got %T", fb.last)
+	}
+	if !strings.Contains(cfg.Text, "Админы:") {
+		t.Fatalf("expected admins list text, got %q", cfg.Text)
+	}
+}
+
+func TestHandlers_HandleAdminCallback_AuditTail(t *testing.T) {
+	fb := &fakeBot{}
+	repo := repository.NewMemoryRepository()
+	h := newTestHandlers(fb)
+	h.Booking = service.NewBookingService(repo, nil)
+	repo.SetAdminRole(902, repository.AdminRoleOwner)
+
+	h.handleAdminCallback(&tgbotapi.CallbackQuery{
+		Data: "admin:audit",
+		Message: &tgbotapi.Message{
+			Chat: &tgbotapi.Chat{ID: 10},
+		},
+		From: &tgbotapi.User{ID: 902},
+	})
+	cfg, ok := fb.last.(tgbotapi.MessageConfig)
+	if !ok {
+		t.Fatalf("expected MessageConfig, got %T", fb.last)
+	}
+	if !strings.Contains(cfg.Text, "audit") && !strings.Contains(cfg.Text, "Аудит") {
+		t.Fatalf("expected audit text, got %q", cfg.Text)
+	}
+}
+
+func TestHandlers_HandleAdminCallback_BlackoutListAndDeactivate(t *testing.T) {
+	fb := &fakeBot{}
+	repo := repository.NewMemoryRepository()
+	h := newTestHandlers(fb)
+	h.Booking = service.NewBookingService(repo, nil)
+	repo.SetAdminRole(903, repository.AdminRoleOwner)
+	doctorID, specialtyID := int64(1), int64(1)
+	rule, err := repo.CreateBlackoutRule(context.Background(), repository.ScheduleBlackoutRule{
+		Scope:       repository.BlackoutScopeDoctorSpecialty,
+		Kind:        repository.BlackoutKindBlackout,
+		DoctorID:    &doctorID,
+		SpecialtyID: &specialtyID,
+		StartsAt:    time.Now().UTC().Add(1 * time.Hour),
+		EndsAt:      time.Now().UTC().Add(2 * time.Hour),
+		Reason:      "test",
+	})
+	if err != nil {
+		t.Fatalf("create blackout rule error: %v", err)
+	}
+
+	h.handleAdminCallback(&tgbotapi.CallbackQuery{
+		Data: "admin:blackouts",
+		Message: &tgbotapi.Message{
+			Chat: &tgbotapi.Chat{ID: 10},
+		},
+		From: &tgbotapi.User{ID: 903},
+	})
+	cfg, ok := fb.last.(tgbotapi.MessageConfig)
+	if !ok {
+		t.Fatalf("expected MessageConfig, got %T", fb.last)
+	}
+	if !strings.Contains(cfg.Text, "blackout") {
+		t.Fatalf("expected blackout list text, got %q", cfg.Text)
+	}
+
+	h.handleAdminCallback(&tgbotapi.CallbackQuery{
+		Data: "admin:blackoutoff:" + strconv.FormatInt(rule.ID, 10),
+		Message: &tgbotapi.Message{
+			Chat: &tgbotapi.Chat{ID: 10},
+		},
+		From: &tgbotapi.User{ID: 903},
+	})
+	cfg, ok = fb.last.(tgbotapi.MessageConfig)
+	if !ok {
+		t.Fatalf("expected MessageConfig, got %T", fb.last)
+	}
+	if !strings.Contains(cfg.Text, "деактивировано") {
+		t.Fatalf("expected blackout deactivated text, got %q", cfg.Text)
 	}
 }
