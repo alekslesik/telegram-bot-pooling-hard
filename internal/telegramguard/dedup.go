@@ -42,3 +42,18 @@ func (d *Deduplicator) Seen(ctx context.Context, updateID int) (bool, error) {
 	}
 	return !isNew, nil
 }
+
+func (d *Deduplicator) SeenKey(ctx context.Context, key string) (bool, error) {
+	if d == nil || d.store == nil {
+		return false, nil
+	}
+	if strings.TrimSpace(key) == "" {
+		return false, nil
+	}
+	fullKey := fmt.Sprintf("%s:%s", d.keyPrefix, key)
+	isNew, err := d.store.SetNXEX(ctx, fullKey, "1", d.ttl)
+	if err != nil {
+		return false, err
+	}
+	return !isNew, nil
+}

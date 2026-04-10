@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -90,6 +91,7 @@ type slogLogger interface {
 
 type updateDeduplicator interface {
 	Seen(ctx context.Context, updateID int) (bool, error)
+	SeenKey(ctx context.Context, key string) (bool, error)
 }
 
 type updateRateLimiter interface {
@@ -98,6 +100,19 @@ type updateRateLimiter interface {
 
 type commandRegistrar interface {
 	Request(tgbotapi.Chattable) (*tgbotapi.APIResponse, error)
+}
+
+type reliabilityAlertEmitter func(event, message string, contextFields map[string]any)
+
+const readinessMonitorInterval = 30 * time.Second
+
+type dispatchGuards struct {
+	dedup           updateDeduplicator
+	globalLimiter   updateRateLimiter
+	msgLimiter      updateRateLimiter
+	callbackLimiter updateRateLimiter
+	blocklist       map[int64]struct{}
+	alert           reliabilityAlertEmitter
 }
 
 func clearBotCommands(reg commandRegistrar, logger slogLogger) {
@@ -116,6 +131,7 @@ func longPollTimeoutSeconds() int {
 
 func main() {
 	logger := logging.NewFromEnv()
+	reliabilityAlerts := newReliabilityAlertEmitter(strings.TrimSpace(os.Getenv("RELIABILITY_ALERT_WEBHOOK")), logger)
 
 	buildDate := formatBuildDate(BuildDate)
 
@@ -152,7 +168,7 @@ func main() {
 		log.Fatalf("failed to init booking repository: %v", err)
 	}
 
-	redisCache, msgLimiter, callbackLimiter, updateDedup, err := initTelegramGuards(logger)
+	redisCache, globalLimiter, msgLimiter, callbackLimiter, updateDedup, blocklist, err := initTelegramGuards(logger)
 	if err != nil {
 		log.Fatalf("redis: %v", err)
 	}
@@ -173,14 +189,23 @@ func main() {
 	}
 
 	startOutboxWorker(workerCtx, logger, tg, bookingRepo)
-	healthSrv := startHealthServer(logger, dbConn, redisCache)
+	healthSrv := startHealthServer(logger, dbConn, redisCache, reliabilityAlerts)
+	startReadinessMonitor(workerCtx, logger, dbConn, redisCache, outboxWorkerEnabled(), reliabilityAlerts, readinessMonitorInterval)
 
 	logger.Info("bot started with long polling, press Ctrl+C to stop")
 
+	guards := dispatchGuards{
+		dedup:           updateDedup,
+		globalLimiter:   globalLimiter,
+		msgLimiter:      msgLimiter,
+		callbackLimiter: callbackLimiter,
+		blocklist:       blocklist,
+		alert:           reliabilityAlerts,
+	}
 	for {
 		select {
 		case update := <-updates:
-			dispatchTelegramUpdate(context.Background(), logger, &h, update, updateDedup, msgLimiter, callbackLimiter)
+			dispatchTelegramUpdate(context.Background(), logger, &h, update, guards)
 
 		case sig := <-stop:
 			logger.Info("received signal, shutting down", "signal", sig.String())
@@ -195,6 +220,64 @@ func main() {
 	}
 }
 
+func startReadinessMonitor(
+	ctx context.Context,
+	logger slogLogger,
+	dbConn *sql.DB,
+	redisCache *cache.Redis,
+	outboxEnabled bool,
+	alert reliabilityAlertEmitter,
+	interval time.Duration,
+) {
+	if alert == nil || interval <= 0 {
+		return
+	}
+	check := func() (health.ReadinessSnapshot, bool) {
+		return health.EvaluateReadiness(dbConn, redisCache, outboxEnabled)
+	}
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		runReadinessMonitor(ctx, logger, ticker.C, check, alert)
+	}()
+}
+
+func runReadinessMonitor(
+	ctx context.Context,
+	logger slogLogger,
+	ticks <-chan time.Time,
+	check func() (health.ReadinessSnapshot, bool),
+	alert reliabilityAlertEmitter,
+) {
+	if alert == nil || check == nil {
+		return
+	}
+	_, prevReady := check()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticks:
+			snapshot, ready := check()
+			if ready == prevReady {
+				continue
+			}
+			prevReady = ready
+			event := "readiness_degraded"
+			msg := "readiness transitioned to not_ready"
+			if ready {
+				event = "readiness_recovered"
+				msg = "readiness transitioned to ready"
+			}
+			alert(event, msg, map[string]any{
+				"status": snapshot.Status,
+				"checks": snapshot.Checks,
+			})
+			logger.Warn("readiness state transitioned", "event", event, "status", snapshot.Status)
+		}
+	}
+}
+
 func initTelegramClient(token string) (*tgbotapi.BotAPI, error) {
 	return telegram.New(token)
 }
@@ -204,36 +287,124 @@ func dispatchTelegramUpdate(
 	logger slogLogger,
 	h *bot.Handlers,
 	u tgbotapi.Update,
-	dedup updateDeduplicator,
-	msgLimiter updateRateLimiter,
-	callbackLimiter updateRateLimiter,
+	guards dispatchGuards,
 ) {
-	if dedup != nil && u.UpdateID != 0 {
-		duplicate, err := dedup.Seen(ctx, u.UpdateID)
-		if err != nil {
-			logger.Error("telegram update dedup failed", "err", err, "update_id", u.UpdateID)
-		} else if duplicate {
-			return
-		}
+	if isDuplicateUpdate(ctx, logger, u, guards) {
+		return
 	}
 
 	userID, kind, ok := telegramUpdateIdentity(u)
 	if ok {
-		limiter := msgLimiter
-		if kind == "callback" {
-			limiter = callbackLimiter
+		if _, blocked := guards.blocklist[userID]; blocked {
+			logger.Warn(
+				"telegram update blocked by operator blocklist",
+				"telegram_user_id", userID,
+				"kind", kind,
+				"update_id", u.UpdateID,
+			)
+			return
 		}
-		if limiter != nil {
-			allowed, err := limiter.Allow(ctx, userID, kind)
-			if err != nil {
-				logger.Error("telegram rate limit check failed", "err", err, "telegram_user_id", userID, "kind", kind)
-			} else if !allowed {
-				logger.Warn("telegram update rate limited", "telegram_user_id", userID, "kind", kind)
-				return
-			}
+		if !allowByGlobalLimit(ctx, logger, guards, userID, kind, u.UpdateID) {
+			return
+		}
+		if !allowByPerUserLimit(ctx, logger, guards, userID, kind) {
+			return
 		}
 	}
 	applyTelegramUpdate(h, u)
+}
+
+func isDuplicateUpdate(ctx context.Context, logger slogLogger, u tgbotapi.Update, guards dispatchGuards) bool {
+	for _, dedupKey := range telegramUpdateDedupKeys(u) {
+		duplicate, err := dedupSeen(ctx, guards.dedup, dedupKey)
+		if err != nil {
+			logger.Error("telegram update dedup failed", "err", err, "dedup_key", dedupKey)
+			if guards.alert != nil {
+				guards.alert("dedup_check_error", "telegram update dedup failed", map[string]any{
+					"error":     err.Error(),
+					"dedup_key": dedupKey,
+					"update_id": u.UpdateID,
+				})
+			}
+			continue
+		}
+		if duplicate {
+			return true
+		}
+	}
+	return false
+}
+
+func allowByGlobalLimit(ctx context.Context, logger slogLogger, guards dispatchGuards, userID int64, kind string, updateID int) bool {
+	if guards.globalLimiter == nil {
+		return true
+	}
+	allowed, err := guards.globalLimiter.Allow(ctx, 0, "global")
+	if err != nil {
+		logger.Error("telegram global rate limit check failed", "err", err, "telegram_user_id", userID, "kind", kind)
+		if guards.alert != nil {
+			guards.alert("global_limiter_check_error", "telegram global rate limit check failed", map[string]any{
+				"error":            err.Error(),
+				"telegram_user_id": userID,
+				"kind":             kind,
+				"update_id":        updateID,
+			})
+		}
+		return true
+	}
+	if !allowed {
+		logger.Warn("telegram update globally rate limited", "telegram_user_id", userID, "kind", kind)
+		return false
+	}
+	return true
+}
+
+func allowByPerUserLimit(ctx context.Context, logger slogLogger, guards dispatchGuards, userID int64, kind string) bool {
+	limiter := guards.msgLimiter
+	if kind == "callback" {
+		limiter = guards.callbackLimiter
+	}
+	if limiter == nil {
+		return true
+	}
+	allowed, err := limiter.Allow(ctx, userID, kind)
+	if err != nil {
+		logger.Error("telegram rate limit check failed", "err", err, "telegram_user_id", userID, "kind", kind)
+		return true
+	}
+	if !allowed {
+		logger.Warn("telegram update rate limited", "telegram_user_id", userID, "kind", kind)
+		return false
+	}
+	return true
+}
+
+func dedupSeen(ctx context.Context, dedup updateDeduplicator, dedupKey string) (bool, error) {
+	if dedup == nil || dedupKey == "" {
+		return false, nil
+	}
+	if strings.HasPrefix(dedupKey, "update:") {
+		updateID, err := strconv.Atoi(strings.TrimPrefix(dedupKey, "update:"))
+		if err != nil {
+			return false, nil
+		}
+		return dedup.Seen(ctx, updateID)
+	}
+	return dedup.SeenKey(ctx, dedupKey)
+}
+
+func telegramUpdateDedupKeys(u tgbotapi.Update) []string {
+	keys := make([]string, 0, 3)
+	if u.UpdateID != 0 {
+		keys = append(keys, fmt.Sprintf("update:%d", u.UpdateID))
+	}
+	if u.CallbackQuery != nil && strings.TrimSpace(u.CallbackQuery.ID) != "" {
+		keys = append(keys, "callback:"+u.CallbackQuery.ID)
+	}
+	if u.Message != nil && u.Message.Chat != nil && u.Message.MessageID != 0 {
+		keys = append(keys, fmt.Sprintf("message:%d:%d", u.Message.Chat.ID, u.Message.MessageID))
+	}
+	return keys
 }
 
 func telegramUpdateIdentity(u tgbotapi.Update) (int64, string, bool) {
@@ -248,6 +419,26 @@ func telegramUpdateIdentity(u tgbotapi.Update) (int64, string, bool) {
 
 func telegramRateLimitConfig() (int64, int64) {
 	return parseInt64Env("TELEGRAM_RATE_LIMIT_MSG_PER_MIN", 0), parseInt64Env("TELEGRAM_RATE_LIMIT_CALLBACK_PER_MIN", 0)
+}
+
+func telegramGlobalRateLimitPerMinute() int64 {
+	return parseInt64Env("TELEGRAM_RATE_LIMIT_GLOBAL_PER_MIN", 0)
+}
+
+func telegramBlocklistUserIDs() map[int64]struct{} {
+	raw := strings.TrimSpace(os.Getenv("TELEGRAM_BLOCKLIST_USER_IDS"))
+	if raw == "" {
+		return map[int64]struct{}{}
+	}
+	ids := make(map[int64]struct{})
+	for _, p := range strings.Split(raw, ",") {
+		id, err := strconv.ParseInt(strings.TrimSpace(p), 10, 64)
+		if err != nil {
+			continue
+		}
+		ids[id] = struct{}{}
+	}
+	return ids
 }
 
 func parseInt64Env(key string, def int64) int64 {
@@ -284,18 +475,21 @@ func buildUpdateDeduplicator(logger slogLogger, redisCache *cache.Redis) *telegr
 	return telegramguard.NewDeduplicator(redisCache, 24*time.Hour, "tg:upd")
 }
 
-func initTelegramGuards(logger slogLogger) (*cache.Redis, *telegramguard.Limiter, *telegramguard.Limiter, *telegramguard.Deduplicator, error) {
+func initTelegramGuards(logger slogLogger) (*cache.Redis, *telegramguard.Limiter, *telegramguard.Limiter, *telegramguard.Limiter, *telegramguard.Deduplicator, map[int64]struct{}, error) {
 	redisCache, err := cache.NewRedisFromEnv()
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 	if redisCache != nil {
 		logger.Info("redis cache enabled for specialty pages")
 	}
+	globalLimit := telegramGlobalRateLimitPerMinute()
 	msgLimit, callbackLimit := telegramRateLimitConfig()
+	globalLimiter := telegramguard.NewLimiter(redisCache, globalLimit, 60, "tg:rl:global")
 	msgLimiter, callbackLimiter := buildUpdateLimiters(logger, redisCache, msgLimit, callbackLimit)
 	updateDedup := buildUpdateDeduplicator(logger, redisCache)
-	return redisCache, msgLimiter, callbackLimiter, updateDedup, nil
+	blocklist := telegramBlocklistUserIDs()
+	return redisCache, globalLimiter, msgLimiter, callbackLimiter, updateDedup, blocklist, nil
 }
 
 func startOutboxWorker(ctx context.Context, logger slogLogger, tg *tgbotapi.BotAPI, bookingRepo repository.BookingRepository) {
@@ -317,7 +511,7 @@ func startOutboxWorker(ctx context.Context, logger slogLogger, tg *tgbotapi.BotA
 	logger.Info("outbox worker enabled")
 }
 
-func startHealthServer(logger slogLogger, dbConn *sql.DB, redisCache *cache.Redis) *health.Server {
+func startHealthServer(logger slogLogger, dbConn *sql.DB, redisCache *cache.Redis, alert reliabilityAlertEmitter) *health.Server {
 	addr := healthAddrFromEnv()
 	if addr == "" {
 		return nil
@@ -326,10 +520,94 @@ func startHealthServer(logger slogLogger, dbConn *sql.DB, redisCache *cache.Redi
 	go func() {
 		if err := healthSrv.Start(); err != nil && err != http.ErrServerClosed {
 			logger.Error("health server failed", "err", err)
+			if alert != nil {
+				alert("health_server_startup_failure", "health server failed", map[string]any{
+					"error": err.Error(),
+					"addr":  addr,
+				})
+			}
 		}
 	}()
 	logger.Info("health endpoints enabled", "addr", addr)
 	return healthSrv
+}
+
+func postReliabilityAlert(ctx context.Context, webhookURL, event, message string, contextFields map[string]any) error {
+	payload := map[string]any{
+		"event":   event,
+		"message": message,
+	}
+	if len(contextFields) > 0 {
+		payload["context"] = contextFields
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	const attempts = 2
+	const backoff = 150 * time.Millisecond
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewReader(body))
+		if reqErr != nil {
+			return reqErr
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, doErr := client.Do(req)
+		if doErr == nil {
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+				return nil
+			}
+			doErr = fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		}
+		lastErr = doErr
+		if attempt == attempts {
+			break
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return lastErr
+}
+
+func newReliabilityAlertEmitter(webhookURL string, logger slogLogger) reliabilityAlertEmitter {
+	return newReliabilityAlertEmitterWithClock(webhookURL, logger, time.Now, 60*time.Second)
+}
+
+func newReliabilityAlertEmitterWithClock(webhookURL string, logger slogLogger, now func() time.Time, throttleWindow time.Duration) reliabilityAlertEmitter {
+	if strings.TrimSpace(webhookURL) == "" {
+		return nil
+	}
+	var mu sync.Mutex
+	lastSentByEvent := make(map[string]time.Time)
+	return func(event, message string, contextFields map[string]any) {
+		eventKey := strings.TrimSpace(event)
+		if eventKey == "" {
+			eventKey = "_unknown"
+		}
+		mu.Lock()
+		lastSentAt, exists := lastSentByEvent[eventKey]
+		if exists && now().Sub(lastSentAt) < throttleWindow {
+			mu.Unlock()
+			return
+		}
+		lastSentByEvent[eventKey] = now()
+		mu.Unlock()
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := postReliabilityAlert(ctx, webhookURL, event, message, contextFields); err != nil {
+				logger.Warn("reliability alert delivery failed", "event", event, "err", err)
+			}
+		}()
+	}
 }
 
 func outboxWorkerEnabled() bool {

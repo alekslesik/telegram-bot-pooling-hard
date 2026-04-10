@@ -14,15 +14,18 @@ type Server struct {
 	httpServer *http.Server
 }
 
-type checkResult struct {
+type ReadinessCheck struct {
 	OK     bool   `json:"ok"`
 	Detail string `json:"detail,omitempty"`
 }
 
-type readinessResponse struct {
-	Status string                 `json:"status"`
-	Checks map[string]checkResult `json:"checks"`
+type ReadinessSnapshot struct {
+	Status string                    `json:"status"`
+	Checks map[string]ReadinessCheck `json:"checks"`
 }
+
+type checkResult = ReadinessCheck
+type readinessResponse = ReadinessSnapshot
 
 type healthResponse struct {
 	Status  string `json:"status"`
@@ -73,23 +76,33 @@ func healthHandler(version string, commit string) http.HandlerFunc {
 
 func readinessHandler(db *sql.DB, redisClient *cache.Redis, outboxEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
-		checks := map[string]checkResult{
-			"outbox": {OK: true, Detail: boolDetail(outboxEnabled, "enabled", "disabled")},
-		}
-		dbCheck, dbReady := databaseCheck(db)
-		checks["database"] = dbCheck
-		redisCheck, redisReady := redisReadinessCheck(redisClient)
-		checks["redis"] = redisCheck
-		ready := dbReady && redisReady
-
-		status := "ready"
+		snapshot, ready := EvaluateReadiness(db, redisClient, outboxEnabled)
 		httpCode := http.StatusOK
 		if !ready {
-			status = "not_ready"
 			httpCode = http.StatusServiceUnavailable
 		}
-		writeJSON(w, httpCode, readinessResponse{Status: status, Checks: checks})
+		writeJSON(w, httpCode, readinessResponse(snapshot))
 	}
+}
+
+func EvaluateReadiness(db *sql.DB, redisClient *cache.Redis, outboxEnabled bool) (ReadinessSnapshot, bool) {
+	checks := map[string]ReadinessCheck{
+		"outbox": {OK: true, Detail: boolDetail(outboxEnabled, "enabled", "disabled")},
+	}
+	dbCheck, dbReady := databaseCheck(db)
+	checks["database"] = dbCheck
+	redisCheck, redisReady := redisReadinessCheck(redisClient)
+	checks["redis"] = redisCheck
+	ready := dbReady && redisReady
+
+	status := "ready"
+	if !ready {
+		status = "not_ready"
+	}
+	return ReadinessSnapshot{
+		Status: status,
+		Checks: checks,
+	}, ready
 }
 
 func databaseCheck(db *sql.DB) (checkResult, bool) {
