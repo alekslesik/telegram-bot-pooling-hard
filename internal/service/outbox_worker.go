@@ -2,7 +2,7 @@ package service
 
 import (
 	"context"
-	"strconv"
+	"fmt"
 	"time"
 
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/repository"
@@ -81,7 +81,8 @@ func (w *OutboxWorker) Tick(ctx context.Context) error {
 		}
 		if err := w.handler(ctx, item); err != nil {
 			if w.maxAttempts > 0 && item.Attempts >= w.maxAttempts {
-				_ = w.repo.LogAnalyticsEvent(ctx, nil, "outbox_event_dead", `{"event_id":`+strconv.FormatInt(item.ID, 10)+`,"event_type":"`+item.EventType+`","attempts":`+strconv.Itoa(item.Attempts)+`}`)
+				ctxJSON := fmt.Sprintf(`{"event_id":%d,"event_type":%q,"attempts":%d}`, item.ID, item.EventType, item.Attempts)
+				_ = logAnalyticsWithEnvelope(ctx, w.repo, nil, "outbox_event_dead", ctxJSON, "worker")
 				_ = w.repo.MarkOutboxEventDead(ctx, item.ID, err.Error())
 				if w.deadLetterHook != nil {
 					w.deadLetterHook(ctx, item, err)

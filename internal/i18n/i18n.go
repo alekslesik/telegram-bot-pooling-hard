@@ -105,38 +105,38 @@ func (b Bundle) AnalyticsAdmin(lines []string) string {
 	}
 }
 
-func (b Bundle) NoAnalytics() string {
+func (b Bundle) PaymentSuccess(balanceCents int64) string {
 	switch b.Lang {
 	case En:
-		return "No analytics events in this period."
+		return fmt.Sprintf("Payment received. New balance: %d¢.", balanceCents)
 	default:
-		return "За этот период событий нет."
-	}
-}
-
-func (b Bundle) PaymentTopUpPrompt() string {
-	switch b.Lang {
-	case En:
-		return "You can top up now using Telegram Stars."
-	default:
-		return "Можно пополнить баланс сейчас через Telegram Stars."
+		return fmt.Sprintf("Платеж зачислен. Новый баланс: %d коп.", balanceCents)
 	}
 }
 
 func (b Bundle) PaymentFailed() string {
 	switch b.Lang {
 	case En:
-		return "Payment failed. Please try again later."
+		return "Payment validation failed. Please try again."
 	default:
-		return "Платёж не прошёл. Попробуйте позже."
+		return "Не удалось подтвердить платеж. Попробуйте еще раз."
 	}
 }
 
-func (b Bundle) PaymentSuccess(balanceAfter int64) string {
+func (b Bundle) PaymentTopUpPrompt() string {
 	switch b.Lang {
 	case En:
-		return fmt.Sprintf("Payment credited. New balance: %d cents.", balanceAfter)
+		return "Need more funds? Top up via Telegram Stars and repeat booking."
 	default:
-		return fmt.Sprintf("Платеж зачислен. Новый баланс: %d коп.", balanceAfter)
+		return "Нужно пополнение? Пополните баланс через Telegram Stars и повторите запись."
+	}
+}
+
+func (b Bundle) NoAnalytics() string {
+	switch b.Lang {
+	case En:
+		return "No analytics events in this period."
+	default:
+		return "За этот период событий нет."
 	}
 }

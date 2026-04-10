@@ -1067,7 +1067,34 @@ func (h Handlers) handleAdminCallback(q *tgbotapi.CallbackQuery) {
 	case "audit":
 		text, err = h.Booking.AdminAuditTail(context.Background(), userID, 30)
 	case "analytics":
-		report, errAn := h.Booking.AdminAnalyticsReport(context.Background(), userID)
+		days := 7
+		if len(parts) >= 3 {
+			if parsedDays, ok := parsePositiveInt(parts[2]); ok && parsedDays > 0 {
+				days = parsedDays
+			}
+		}
+		report, errAn := h.Booking.AdminAnalyticsReport(context.Background(), userID, days, nil)
+		err = nil
+		if errAn != nil {
+			text = "Нет доступа к аналитике."
+		} else {
+			b := h.bundleForUser(context.Background(), &tgbotapi.Message{From: q.From})
+			if strings.TrimSpace(report) == "" {
+				text = b.NoAnalytics()
+			} else {
+				text = b.AnalyticsAdmin(strings.Split(strings.TrimSpace(report), "\n"))
+			}
+		}
+	case "analyticsspec":
+		if len(parts) != 4 {
+			return
+		}
+		days, okDays := parsePositiveInt(parts[2])
+		specialtyID, okSpec := parseInt64(parts[3])
+		if !okDays || !okSpec || days <= 0 {
+			return
+		}
+		report, errAn := h.Booking.AdminAnalyticsReport(context.Background(), userID, days, &specialtyID)
 		err = nil
 		if errAn != nil {
 			text = "Нет доступа к аналитике."
@@ -1171,9 +1198,11 @@ func (h Handlers) adminKeyboard(caps service.AdminCapabilities) *tgbotapi.Inline
 		rows = append(rows,
 			tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData("📊 Аналитика (7 дн.)", "admin:analytics:7"),
+				tgbotapi.NewInlineKeyboardButtonData("📊 Аналитика (30 дн.)", "admin:analytics:30"),
 			),
 			tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData("📊 Аналитика (30 дн.)", "admin:analytics:30"),
+				tgbotapi.NewInlineKeyboardButtonData("📈 Терапевт (30 дн.)", "admin:analyticsspec:30:1"),
+				tgbotapi.NewInlineKeyboardButtonData("📈 Кардиолог (30 дн.)", "admin:analyticsspec:30:2"),
 			),
 		)
 	}

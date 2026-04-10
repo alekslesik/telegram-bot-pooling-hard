@@ -415,7 +415,6 @@ func TestHandlers_BookingFlow(t *testing.T) {
 		t.Fatalf("expected registration flow completed: handled=%v err=%v msg=%q", handled, err, msg)
 	}
 }
-
 func TestHandlers_HandlePreCheckout_Reject(t *testing.T) {
 	fb := &fakeBot{}
 	h := newTestHandlers(fb)
@@ -580,6 +579,48 @@ func TestHandlers_AdminKeyboard_AnalyticsPeriodButtons(t *testing.T) {
 	}
 	if !has7 || !has30 {
 		t.Fatalf("expected analytics period buttons, got has7=%v has30=%v", has7, has30)
+	}
+
+	var hasSpec1, hasSpec2 bool
+	for _, row := range kb.InlineKeyboard {
+		for _, btn := range row {
+			if btn.CallbackData == nil {
+				continue
+			}
+			if *btn.CallbackData == "admin:analyticsspec:30:1" {
+				hasSpec1 = true
+			}
+			if *btn.CallbackData == "admin:analyticsspec:30:2" {
+				hasSpec2 = true
+			}
+		}
+	}
+	if !hasSpec1 || !hasSpec2 {
+		t.Fatalf("expected analytics specialty buttons, got hasSpec1=%v hasSpec2=%v", hasSpec1, hasSpec2)
+	}
+}
+
+func TestHandlers_HandleAdminCallback_AnalyticsSegment(t *testing.T) {
+	fb := &fakeBot{}
+	repo := repository.NewMemoryRepository()
+	h := newTestHandlers(fb)
+	h.Booking = service.NewBookingService(repo, nil)
+	repo.SetAdminRole(77, repository.AdminRoleAdmin)
+
+	h.handleAdminCallback(&tgbotapi.CallbackQuery{
+		Data: "admin:analyticsspec:30:2",
+		Message: &tgbotapi.Message{
+			Chat: &tgbotapi.Chat{ID: 10},
+		},
+		From: &tgbotapi.User{ID: 77},
+	})
+
+	cfg, ok := fb.last.(tgbotapi.MessageConfig)
+	if !ok {
+		t.Fatalf("expected MessageConfig, got %T", fb.last)
+	}
+	if !strings.Contains(cfg.Text, "segment: specialty_id=2") {
+		t.Fatalf("expected segmented analytics report, got %q", cfg.Text)
 	}
 }
 
