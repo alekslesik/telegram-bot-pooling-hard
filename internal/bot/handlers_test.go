@@ -208,6 +208,7 @@ func TestAdminKeyboard_VisibilityByCapabilities(t *testing.T) {
 		CanViewAnalytics:  true,
 		CanManageAdmins:   true,
 		CanManageBlackout: true,
+		CanViewAudit:      true,
 	}
 	keyboard := h.adminKeyboard(owner)
 	var data []string
@@ -219,7 +220,7 @@ func TestAdminKeyboard_VisibilityByCapabilities(t *testing.T) {
 		}
 	}
 	joined := strings.Join(data, ",")
-	for _, expected := range []string{"admin:slotsrange", "admin:closedays", "admin:opendays", "admin:blackout", "admin:adminupsert"} {
+	for _, expected := range []string{"admin:slotsrange", "admin:closedays", "admin:opendays", "admin:blackout", "admin:blackouts", "admin:adminupsert", "admin:admins", "admin:audit"} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("expected callback %s in keyboard, got %s", expected, joined)
 		}

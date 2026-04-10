@@ -1048,8 +1048,24 @@ func (h Handlers) handleAdminCallback(q *tgbotapi.CallbackQuery) {
 		text, err = h.Booking.StartAdminDaySlots(context.Background(), userID)
 	case "blackout":
 		text, err = h.Booking.StartAdminAddBlackout(context.Background(), userID)
+	case "blackouts":
+		text, err = h.Booking.AdminListBlackouts(context.Background(), userID, 30)
+	case "blackoutoff":
+		if len(parts) >= 3 {
+			if ruleID, ok := parseInt64(parts[2]); ok {
+				text, err = h.Booking.AdminDeactivateBlackout(context.Background(), userID, ruleID)
+			} else {
+				text = "Неверный rule_id."
+			}
+		} else {
+			text = "Неверный формат."
+		}
 	case "adminupsert":
 		text, err = h.Booking.StartAdminUpsertAdmin(context.Background(), userID)
+	case "admins":
+		text, err = h.Booking.AdminListAdmins(context.Background(), userID, true, 50)
+	case "audit":
+		text, err = h.Booking.AdminAuditTail(context.Background(), userID, 30)
 	case "analytics":
 		report, errAn := h.Booking.AdminAnalyticsReport(context.Background(), userID)
 		err = nil
@@ -1129,12 +1145,25 @@ func (h Handlers) adminKeyboard(caps service.AdminCapabilities) *tgbotapi.Inline
 			tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData("Добавить blackout", "admin:blackout"),
 			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Список blackout", "admin:blackouts"),
+			),
 		)
 	}
 	if caps.CanManageAdmins {
 		rows = append(rows,
 			tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData("Управление админами", "admin:adminupsert"),
+			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Список админов", "admin:admins"),
+			),
+		)
+	}
+	if caps.CanViewAudit {
+		rows = append(rows,
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Audit tail", "admin:audit"),
 			),
 		)
 	}

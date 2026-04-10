@@ -115,6 +115,9 @@ func (s *BookingService) AdminCapabilities(ctx context.Context, userID int64) (A
 }
 
 func (s *BookingService) denyAdminAndReset(ctx context.Context, userID int64) (bool, string, error) {
+	_ = s.repo.LogAdminAction(ctx, userID, "admin_action_denied", auditDetailsJSON(map[string]any{
+		"reason": "insufficient_role",
+	}))
 	_ = s.repo.DeleteConversationState(ctx, userID)
 	return true, "Нет доступа к админ-панели.", nil
 }
@@ -206,8 +209,14 @@ func (s *BookingService) StartAdmin(ctx context.Context, userID int64) (bool, st
 		return false, "", err
 	}
 	if !caps.CanOpenPanel {
+		_ = s.repo.LogAdminAction(ctx, userID, "admin_panel_open_denied", auditDetailsJSON(map[string]any{
+			"reason": "not_admin",
+		}))
 		return false, "Нет доступа к админ-панели.", nil
 	}
+	_ = s.repo.LogAdminAction(ctx, userID, "admin_panel_opened", auditDetailsJSON(map[string]any{
+		"status": "ok",
+	}))
 	return true, "Админ-панель: выберите действие.", nil
 }
 
@@ -389,6 +398,107 @@ func (s *BookingService) StartAdminUpsertAdmin(ctx context.Context, userID int64
 		return "", err
 	}
 	return "Управление админами.\nВведите: telegram_user_id|role|active.\nrole: owner|admin|operator; active: true|false", nil
+}
+
+func (s *BookingService) AdminListAdmins(ctx context.Context, userID int64, includeInactive bool, limit int) (string, error) {
+	caps, err := s.AdminCapabilities(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	if !caps.CanManageAdmins {
+		_ = s.repo.LogAdminAction(ctx, userID, "admin_list_denied", auditDetailsJSON(map[string]any{"reason": "insufficient_role"}))
+		return "Нет доступа к админ-панели.", nil
+	}
+	items, err := s.repo.ListAdmins(ctx, includeInactive, limit, 0)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	b.WriteString("Админы:\n")
+	for _, it := range items {
+		fmt.Fprintf(&b, "- %d | role=%s | active=%t\n", it.TelegramUserID, it.Role, it.IsActive)
+	}
+	_ = s.repo.LogAdminAction(ctx, userID, "admin_list_viewed", auditDetailsJSON(map[string]any{"count": len(items), "include_inactive": includeInactive}))
+	return strings.TrimSpace(b.String()), nil
+}
+
+func (s *BookingService) AdminAuditTail(ctx context.Context, userID int64, limit int) (string, error) {
+	caps, err := s.AdminCapabilities(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	if !caps.CanViewAudit {
+		_ = s.repo.LogAdminAction(ctx, userID, "admin_audit_view_denied", auditDetailsJSON(map[string]any{"reason": "insufficient_role"}))
+		return "Нет доступа к админ-панели.", nil
+	}
+	rows, err := s.repo.ListAdminAuditLogs(ctx, nil, limit, 0)
+	if err != nil {
+		return "", err
+	}
+	if len(rows) == 0 {
+		return "Аудит пуст.", nil
+	}
+	var b strings.Builder
+	b.WriteString("Последние audit события:\n")
+	for _, r := range rows {
+		fmt.Fprintf(&b, "- %s | admin=%d | %s | %s\n", r.CreatedAt.Format(time.RFC3339), r.AdminUserID, r.Action, r.Details)
+	}
+	_ = s.repo.LogAdminAction(ctx, userID, "admin_audit_viewed", auditDetailsJSON(map[string]any{"count": len(rows)}))
+	return strings.TrimSpace(b.String()), nil
+}
+
+func (s *BookingService) AdminListBlackouts(ctx context.Context, userID int64, limit int) (string, error) {
+	caps, err := s.AdminCapabilities(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	if !caps.CanManageBlackout {
+		return "Нет доступа к админ-панели.", nil
+	}
+	from := time.Now().UTC().AddDate(-1, 0, 0)
+	to := time.Now().UTC().AddDate(5, 0, 0)
+	items, err := s.repo.ListBlackoutRules(ctx, from, to, nil, nil)
+	if err != nil {
+		return "", err
+	}
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	if len(items) == 0 {
+		return "Активных blackout правил нет.", nil
+	}
+	var b strings.Builder
+	b.WriteString("Активные blackout правила:\n")
+	for _, it := range items {
+		doc := int64(0)
+		spec := int64(0)
+		if it.DoctorID != nil {
+			doc = *it.DoctorID
+		}
+		if it.SpecialtyID != nil {
+			spec = *it.SpecialtyID
+		}
+		fmt.Fprintf(&b, "- id=%d doctor=%d specialty=%d %s..%s reason=%s\n", it.ID, doc, spec, it.StartsAt.Format(time.RFC3339), it.EndsAt.Format(time.RFC3339), it.Reason)
+	}
+	return strings.TrimSpace(b.String()), nil
+}
+
+func (s *BookingService) AdminDeactivateBlackout(ctx context.Context, userID, ruleID int64) (string, error) {
+	caps, err := s.AdminCapabilities(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	if !caps.CanManageBlackout {
+		return "Нет доступа к админ-панели.", nil
+	}
+	if err := s.repo.DeactivateBlackoutRule(ctx, ruleID); err != nil {
+		if err == repository.ErrNotFound {
+			return "Blackout правило не найдено.", nil
+		}
+		return "", err
+	}
+	_ = s.repo.LogAdminAction(ctx, userID, "blackout_rule_deactivated", auditDetailsJSON(map[string]any{"rule_id": ruleID}))
+	return fmt.Sprintf("Blackout правило %d деактивировано.", ruleID), nil
 }
 
 func (s *BookingService) handleAdminAddSpecialty(ctx context.Context, userID int64, text string) (bool, string, error) {
