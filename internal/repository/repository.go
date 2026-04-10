@@ -1663,10 +1663,12 @@ func (r *MemoryRepository) CountClinicBookingsCancelledSince(_ context.Context, 
 	defer r.mu.RUnlock()
 	var count int64
 	for _, b := range r.clinicBooking {
-		if b.Status != "cancelled" || b.CancelledAt == nil || b.CancelledAt.Before(since) {
+		if b.Status != "cancelled" || b.CancelledAt == nil {
 			continue
 		}
-		count++
+		if !b.CancelledAt.Before(since) {
+			count++
+		}
 	}
 	return count, nil
 }
