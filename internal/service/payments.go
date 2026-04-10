@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/alekslesik/telegram-bot-pooling-hard/internal/payments"
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/repository"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -122,6 +123,32 @@ func (s *PaymentService) ApplySuccessfulPayment(fromUserID int64, sp *tgbotapi.S
 		fromUserID,
 		decoded.Stars,
 		starsKopeksPerUnit,
+		chargeID,
+		string(metaRaw),
+	)
+}
+
+func (s *PaymentService) ApplyExternalProviderCallback(callback payments.ExternalCallback) (repository.StarsTopUpResult, error) {
+	if err := callback.Validate(); err != nil {
+		return repository.StarsTopUpResult{}, err
+	}
+	chargeID, err := payments.BuildExternalOperationID(callback.ProviderCode, callback.OperationRef)
+	if err != nil {
+		return repository.StarsTopUpResult{}, err
+	}
+	metaRaw, _ := json.Marshal(map[string]any{
+		"source":              "external_psp",
+		"provider":            strings.TrimSpace(callback.ProviderCode),
+		"operation_ref":       strings.TrimSpace(callback.OperationRef),
+		"currency":            strings.TrimSpace(callback.Currency),
+		"amount_minor":        callback.AmountMinor,
+		"external_charge_key": chargeID,
+	})
+	return s.repo.ApplyTelegramStarsTopUp(
+		context.Background(),
+		callback.UserID,
+		callback.AmountMinor,
+		1,
 		chargeID,
 		string(metaRaw),
 	)

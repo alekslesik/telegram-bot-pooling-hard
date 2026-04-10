@@ -48,6 +48,24 @@ func (f *fakeBot) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
 	return &tgbotapi.APIResponse{Ok: true}, nil
 }
 
+type recorderBot struct {
+	last     tgbotapi.Chattable
+	sent     []tgbotapi.Chattable
+	requests []tgbotapi.Chattable
+}
+
+func (r *recorderBot) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
+	r.last = c
+	r.sent = append(r.sent, c)
+	return tgbotapi.Message{}, nil
+}
+
+func (r *recorderBot) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
+	r.last = c
+	r.requests = append(r.requests, c)
+	return &tgbotapi.APIResponse{Ok: true}, nil
+}
+
 type fakeBotSendErr struct{}
 
 func (fakeBotSendErr) Send(tgbotapi.Chattable) (tgbotapi.Message, error) {
@@ -458,6 +476,164 @@ func TestHandlers_HandleMessage_SuccessfulPayment_SendsConfirmation(t *testing.T
 	if !strings.Contains(cfg.Text, "Новый баланс") {
 		t.Fatalf("expected payment success confirmation, got %q", cfg.Text)
 	}
+}
+
+func TestHandlers_LiveLikePaymentFlow_InvoicePreCheckoutAndIdempotentSuccess(t *testing.T) {
+	fb := &recorderBot{}
+	repo := repository.NewMemoryRepository()
+	payments := service.NewPaymentService(repo)
+	h := newTestHandlers(fb)
+	h.Payments = payments
+
+	const userID int64 = 5100
+	before, err := repo.EnsureUserProfile(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("ensure user profile: %v", err)
+	}
+
+	h.HandleCallback(&tgbotapi.CallbackQuery{
+		ID:   "cb-pay-live",
+		From: &tgbotapi.User{ID: userID, LanguageCode: "en"},
+		Message: &tgbotapi.Message{
+			Chat: &tgbotapi.Chat{ID: userID},
+		},
+		Data: "pay:stars:pack:10",
+	})
+
+	if len(fb.sent) == 0 {
+		t.Fatal("expected invoice to be sent")
+	}
+	invoice, ok := fb.sent[len(fb.sent)-1].(tgbotapi.InvoiceConfig)
+	if !ok {
+		t.Fatalf("expected InvoiceConfig, got %T", fb.sent[len(fb.sent)-1])
+	}
+	if invoice.Currency != "XTR" {
+		t.Fatalf("unexpected invoice currency: %s", invoice.Currency)
+	}
+	if len(invoice.Prices) != 1 || invoice.Prices[0].Amount != 10 {
+		t.Fatalf("unexpected invoice prices: %+v", invoice.Prices)
+	}
+
+	h.HandlePreCheckout(&tgbotapi.PreCheckoutQuery{
+		ID:             "pcq-live-1",
+		Currency:       "XTR",
+		TotalAmount:    10,
+		InvoicePayload: invoice.Payload,
+		From:           &tgbotapi.User{ID: userID, LanguageCode: "en"},
+	})
+	if len(fb.requests) == 0 {
+		t.Fatal("expected pre-checkout response request")
+	}
+	preCfg, ok := fb.requests[len(fb.requests)-1].(tgbotapi.PreCheckoutConfig)
+	if !ok {
+		t.Fatalf("expected PreCheckoutConfig, got %T", fb.requests[len(fb.requests)-1])
+	}
+	if !preCfg.OK {
+		t.Fatalf("expected pre-checkout acceptance, got error=%q", preCfg.ErrorMessage)
+	}
+
+	delivery := &tgbotapi.Message{
+		Chat: &tgbotapi.Chat{ID: userID},
+		From: &tgbotapi.User{ID: userID, LanguageCode: "en"},
+		SuccessfulPayment: &tgbotapi.SuccessfulPayment{
+			Currency:                "XTR",
+			TotalAmount:             10,
+			InvoicePayload:          invoice.Payload,
+			TelegramPaymentChargeID: "tg-live-5100",
+			ProviderPaymentChargeID: "provider-live-5100",
+		},
+	}
+	h.HandleMessage(delivery)
+	h.HandleMessage(delivery) // duplicate callback replay from Telegram side
+
+	after, err := repo.GetUserProfile(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("get user profile after deliveries: %v", err)
+	}
+	wantBalance := before.BalanceCents + 1000
+	if after.BalanceCents != wantBalance {
+		t.Fatalf("idempotent flow balance mismatch: got=%d want=%d", after.BalanceCents, wantBalance)
+	}
+}
+
+func TestHandlers_LiveLikePaymentFlow_FailureBranches(t *testing.T) {
+	fb := &recorderBot{}
+	repo := repository.NewMemoryRepository()
+	payments := service.NewPaymentService(repo)
+	h := newTestHandlers(fb)
+	h.Payments = payments
+
+	const userID int64 = 5200
+	payload, err := payments.BuildTopUpInvoicePayload(userID, 10)
+	if err != nil {
+		t.Fatalf("build payload: %v", err)
+	}
+
+	t.Run("payload mismatch", func(t *testing.T) {
+		h.HandlePreCheckout(&tgbotapi.PreCheckoutQuery{
+			ID:             "pcq-mismatch",
+			Currency:       "XTR",
+			TotalAmount:    10,
+			InvoicePayload: payload,
+			From:           &tgbotapi.User{ID: userID + 1, LanguageCode: "en"},
+		})
+		cfg, ok := fb.requests[len(fb.requests)-1].(tgbotapi.PreCheckoutConfig)
+		if !ok {
+			t.Fatalf("expected PreCheckoutConfig, got %T", fb.requests[len(fb.requests)-1])
+		}
+		if cfg.OK {
+			t.Fatal("expected pre-checkout rejection for payload mismatch")
+		}
+	})
+
+	t.Run("wrong currency", func(t *testing.T) {
+		h.HandlePreCheckout(&tgbotapi.PreCheckoutQuery{
+			ID:             "pcq-currency",
+			Currency:       "USD",
+			TotalAmount:    10,
+			InvoicePayload: payload,
+			From:           &tgbotapi.User{ID: userID, LanguageCode: "en"},
+		})
+		cfg, ok := fb.requests[len(fb.requests)-1].(tgbotapi.PreCheckoutConfig)
+		if !ok {
+			t.Fatalf("expected PreCheckoutConfig, got %T", fb.requests[len(fb.requests)-1])
+		}
+		if cfg.OK {
+			t.Fatal("expected pre-checkout rejection for wrong currency")
+		}
+	})
+
+	t.Run("successful payment payload mismatch", func(t *testing.T) {
+		before, err := repo.EnsureUserProfile(context.Background(), userID)
+		if err != nil {
+			t.Fatalf("ensure user profile: %v", err)
+		}
+		h.HandleMessage(&tgbotapi.Message{
+			Chat: &tgbotapi.Chat{ID: userID},
+			From: &tgbotapi.User{ID: userID + 11, LanguageCode: "en"},
+			SuccessfulPayment: &tgbotapi.SuccessfulPayment{
+				Currency:                "XTR",
+				TotalAmount:             10,
+				InvoicePayload:          payload,
+				TelegramPaymentChargeID: "tg-fail-5200",
+				ProviderPaymentChargeID: "provider-fail-5200",
+			},
+		})
+		msg, ok := fb.last.(tgbotapi.MessageConfig)
+		if !ok {
+			t.Fatalf("expected MessageConfig failure reply, got %T", fb.last)
+		}
+		if strings.TrimSpace(msg.Text) == "" {
+			t.Fatal("expected non-empty failure message")
+		}
+		after, err := repo.GetUserProfile(context.Background(), userID)
+		if err != nil {
+			t.Fatalf("get profile: %v", err)
+		}
+		if after.BalanceCents != before.BalanceCents {
+			t.Fatalf("balance changed on payload mismatch: before=%d after=%d", before.BalanceCents, after.BalanceCents)
+		}
+	})
 }
 
 func TestHandlers_HandleBookingCallback_LogsFunnelSpecialtySelected(t *testing.T) {
