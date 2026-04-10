@@ -16,6 +16,7 @@ For each user task, always create a feature branch, commit with Conventional Com
 
 PR ownership preference:
 - Prepare branches/commits/PRs, but do **not** merge PRs unless the user explicitly asks.
+- User preference override: never merge PRs as the agent. Always stop at green CI and hand off the PR link for manual merge by the user.
 - In each PR body, include a concise changelog and a `Release notes draft` section.
 - Before opening every PR, run `make preprod`.
 - After local runtime verification, always stop started containers with `make docker-compose-down`.
@@ -54,3 +55,8 @@ Do a lightweight cycle:
 - Never commit or push directly to `main`.
 - Delete only local branches unless explicitly asked otherwise.
 - Avoid destructive git operations unless explicitly requested.
+
+# User Progress Reporting
+
+- During multi-step implementation tasks, after each completed step report current completion percentage to the user (e.g., `Progress: 35%`), based on the execution plan for that task.
+- If the user explicitly asks for percentage reporting, include a progress percentage update after every operational step until the task is fully complete.
