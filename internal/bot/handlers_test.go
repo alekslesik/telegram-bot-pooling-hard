@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -365,4 +366,118 @@ func TestHandlers_BookingFlow(t *testing.T) {
 	if err != nil || handled || msg != "" {
 		t.Fatalf("expected registration flow completed: handled=%v err=%v msg=%q", handled, err, msg)
 	}
+}
+
+func TestHandlers_HandleCallback_BookFlow_LogsFunnelEvents(t *testing.T) {
+	fb := &fakeBot{}
+	repo := repository.NewMemoryRepository()
+	h := newTestHandlers(fb)
+	h.Booking = service.NewBookingService(repo, nil)
+	userID := int64(501)
+	since := time.Now().UTC().Add(-time.Minute)
+
+	h.HandleCallback(&tgbotapi.CallbackQuery{
+		ID:   "spec",
+		From: &tgbotapi.User{ID: userID},
+		Message: &tgbotapi.Message{
+			Chat: &tgbotapi.Chat{ID: userID},
+		},
+		Data: "book:spec:1:0",
+	})
+	h.HandleCallback(&tgbotapi.CallbackQuery{
+		ID:   "doc",
+		From: &tgbotapi.User{ID: userID},
+		Message: &tgbotapi.Message{
+			Chat: &tgbotapi.Chat{ID: userID},
+		},
+		Data: "book:doc:1:1:0",
+	})
+	h.HandleCallback(&tgbotapi.CallbackQuery{
+		ID:   "slot",
+		From: &tgbotapi.User{ID: userID},
+		Message: &tgbotapi.Message{
+			Chat: &tgbotapi.Chat{ID: userID},
+		},
+		Data: "book:slot:1:1:1",
+	})
+
+	counts, err := repo.CountAnalyticsByEventSince(context.Background(), since)
+	if err != nil {
+		t.Fatalf("count analytics failed: %v", err)
+	}
+	if counts["funnel_book_specialty_selected"] != 1 {
+		t.Fatalf("expected funnel specialty event=1, got %d", counts["funnel_book_specialty_selected"])
+	}
+	if counts["funnel_book_doctor_selected"] != 1 {
+		t.Fatalf("expected funnel doctor event=1, got %d", counts["funnel_book_doctor_selected"])
+	}
+	if counts["funnel_book_slot_selected"] != 1 {
+		t.Fatalf("expected funnel slot event=1, got %d", counts["funnel_book_slot_selected"])
+	}
+}
+
+func TestHandlers_HandleAdminCallback_AnalyticsPeriodAndSegment(t *testing.T) {
+	fb := &fakeBot{}
+	repo := repository.NewMemoryRepository()
+	h := newTestHandlers(fb)
+	h.Booking = service.NewBookingService(repo, nil)
+	adminID := int64(892122714)
+
+	tests := []struct {
+		name     string
+		data     string
+		contains string
+	}{
+		{name: "default_7d", data: "admin:analytics", contains: "- period: last 7 days"},
+		{name: "period_30d", data: "admin:analytics:30", contains: "- period: last 30 days"},
+		{name: "segment_spec_2", data: "admin:analyticsspec:30:2", contains: "- segment: specialty_id=2"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h.HandleCallback(&tgbotapi.CallbackQuery{
+				ID:   "adm",
+				From: &tgbotapi.User{ID: adminID},
+				Message: &tgbotapi.Message{
+					Chat: &tgbotapi.Chat{ID: adminID},
+				},
+				Data: tt.data,
+			})
+			cfg, ok := fb.last.(tgbotapi.MessageConfig)
+			if !ok {
+				t.Fatalf("expected MessageConfig, got %T", fb.last)
+			}
+			if !strings.Contains(cfg.Text, tt.contains) {
+				t.Fatalf("expected text to contain %q, got %q", tt.contains, cfg.Text)
+			}
+		})
+	}
+}
+
+func TestHandlers_AdminKeyboard_AnalyticsShortcuts(t *testing.T) {
+	h := newTestHandlers(&fakeBot{})
+	kb := h.adminKeyboard(service.AdminCapabilities{CanViewAnalytics: true})
+
+	expected := []string{
+		"admin:analytics:7",
+		"admin:analytics:30",
+		"admin:analyticsspec:30:1",
+		"admin:analyticsspec:30:2",
+	}
+	for _, cb := range expected {
+		if !inlineKeyboardHasCallback(*kb, cb) {
+			t.Fatalf("expected analytics callback %q in keyboard", cb)
+		}
+	}
+}
+
+func inlineKeyboardHasCallback(kb tgbotapi.InlineKeyboardMarkup, callback string) bool {
+	for _, row := range kb.InlineKeyboard {
+		for _, btn := range row {
+			if btn.CallbackData != nil && *btn.CallbackData == callback {
+				return true
+			}
+		}
+	}
+	return false
 }

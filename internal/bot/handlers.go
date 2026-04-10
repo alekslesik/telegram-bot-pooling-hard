@@ -623,6 +623,15 @@ func (h Handlers) handleBookingCallback(q *tgbotapi.CallbackQuery) {
 		if !ok1 || !ok2 {
 			return
 		}
+		if h.Booking != nil {
+			userID := q.Message.Chat.ID
+			if q.From != nil {
+				userID = q.From.ID
+			}
+			uidp := userID
+			payload, _ := json.Marshal(map[string]int64{"specialty_id": specID})
+			_ = h.Booking.LogAnalytics(context.Background(), &uidp, "funnel_book_specialty_selected", string(payload))
+		}
 		reply := tgbotapi.NewMessage(chatID, "Выберите врача:")
 		reply.ReplyMarkup = h.doctorsKeyboard(context.Background(), specID, page)
 		_, _ = h.Bot.Send(reply)
@@ -647,6 +656,15 @@ func (h Handlers) handleBookingCallback(q *tgbotapi.CallbackQuery) {
 		page, ok3 := parsePositiveInt(parts[4])
 		if !ok1 || !ok2 || !ok3 {
 			return
+		}
+		if h.Booking != nil {
+			userID := q.Message.Chat.ID
+			if q.From != nil {
+				userID = q.From.ID
+			}
+			uidp := userID
+			payload, _ := json.Marshal(map[string]int64{"specialty_id": specID, "doctor_id": docID})
+			_ = h.Booking.LogAnalytics(context.Background(), &uidp, "funnel_book_doctor_selected", string(payload))
 		}
 		reply := tgbotapi.NewMessage(chatID, "Выберите дату и время:")
 		reply.ReplyMarkup = h.slotsKeyboard(context.Background(), specID, docID, page)
@@ -678,6 +696,9 @@ func (h Handlers) handleBookingCallback(q *tgbotapi.CallbackQuery) {
 		if q.From != nil {
 			userID = q.From.ID
 		}
+		uidp := userID
+		payloadSlot, _ := json.Marshal(map[string]int64{"specialty_id": specID, "doctor_id": docID, "slot_id": slotID})
+		_ = h.Booking.LogAnalytics(context.Background(), &uidp, "funnel_book_slot_selected", string(payloadSlot))
 		lang := i18n.Ru
 		if q.From != nil {
 			stored := "ru"
@@ -896,7 +917,34 @@ func (h Handlers) handleAdminCallback(q *tgbotapi.CallbackQuery) {
 	case "dayslots":
 		text, err = h.Booking.StartAdminDaySlots(context.Background(), userID)
 	case "analytics":
-		report, errAn := h.Booking.AdminAnalyticsReport(context.Background(), userID, 7, nil)
+		days := 7
+		if len(parts) >= 3 {
+			if parsedDays, ok := parsePositiveInt(parts[2]); ok && parsedDays > 0 {
+				days = parsedDays
+			}
+		}
+		report, errAn := h.Booking.AdminAnalyticsReport(context.Background(), userID, days, nil)
+		err = nil
+		if errAn != nil {
+			text = "Нет доступа к аналитике."
+		} else {
+			b := h.bundleForUser(context.Background(), &tgbotapi.Message{From: q.From})
+			if strings.TrimSpace(report) == "" {
+				text = b.NoAnalytics()
+			} else {
+				text = b.AnalyticsAdmin(strings.Split(strings.TrimSpace(report), "\n"))
+			}
+		}
+	case "analyticsspec":
+		if len(parts) != 4 {
+			return
+		}
+		days, okDays := parsePositiveInt(parts[2])
+		specialtyID, okSpec := parseInt64(parts[3])
+		if !okDays || !okSpec || days <= 0 {
+			return
+		}
+		report, errAn := h.Booking.AdminAnalyticsReport(context.Background(), userID, days, &specialtyID)
 		err = nil
 		if errAn != nil {
 			text = "Нет доступа к аналитике."
@@ -963,7 +1011,12 @@ func (h Handlers) adminKeyboard(caps service.AdminCapabilities) *tgbotapi.Inline
 	if caps.CanViewAnalytics {
 		rows = append(rows,
 			tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData("📊 Аналитика (7 дн.)", "admin:analytics"),
+				tgbotapi.NewInlineKeyboardButtonData("📊 Аналитика (7 дн.)", "admin:analytics:7"),
+				tgbotapi.NewInlineKeyboardButtonData("📊 Аналитика (30 дн.)", "admin:analytics:30"),
+			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("📈 Терапевт (30 дн.)", "admin:analyticsspec:30:1"),
+				tgbotapi.NewInlineKeyboardButtonData("📈 Кардиолог (30 дн.)", "admin:analyticsspec:30:2"),
 			),
 		)
 	}
