@@ -162,11 +162,6 @@ func main() {
 
 	var specCache service.SpecialtyPageCache = redisCache
 	bookingService := service.NewBookingService(bookingRepo, specCache)
-	var paymentsService *service.PaymentService
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("ONLINE_PAYMENT_MODE")), "stars") {
-		paymentsService = service.NewPaymentService(bookingRepo)
-		logger.Info("online payments enabled", "mode", "stars")
-	}
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	defer workerCancel()
 
@@ -174,7 +169,6 @@ func main() {
 		Bot:         tg,
 		Logger:      logger,
 		Booking:     bookingService,
-		Payments:    paymentsService,
 		BotUsername: tg.Self.UserName,
 	}
 
