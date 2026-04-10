@@ -57,12 +57,14 @@ This file mirrors the user-maintained RFC checklist and records **implementation
 
 ## 5) Reliability & operations
 
+**Const:** `ready_section_5_reliability_operations = 100%`
+
 | Item | Status |
 |------|--------|
-| Rate limiting + anti-abuse | **Not done** |
-| Idempotent handler ops for critical paths | **Partial** — money idempotency in repo; transport/handler layer not fully covered |
-| Health/readiness + structured logs + alerting | **Partial** — health server exists |
-| Runbook (rollback, DB recovery, secret rotation) | **Not done** (unless added elsewhere) |
+| Rate limiting + anti-abuse | **Done** — per-user limits, global limiter, and operator blocklist in dispatcher (`TELEGRAM_RATE_LIMIT_*`, `TELEGRAM_BLOCKLIST_USER_IDS`) |
+| Idempotent handler ops for critical paths | **Done** — repo-layer money idempotency + transport dedup for `update_id`, callback ID, and chat/message ID |
+| Health/readiness + structured logs + alerting | **Done** — `/healthz` + `/readyz`, structured logs, reliability alert webhook with retries/throttle, transition alerts (`readiness_degraded` / `readiness_recovered`) |
+| Runbook (rollback, DB recovery, secret rotation) | **Done** — `docs/ops/RUNBOOK.md` |
 
 ---
 

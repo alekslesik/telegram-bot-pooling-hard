@@ -1,0 +1,6 @@
+# RFC Section 5 Progress Auto-Continue
+
+- Maintain and update the variable `ready_section_5_reliability_operations` in `docs/rfc-todo-status.md` after each meaningful change affecting RFC section 5.
+- When reporting progress to the user, report the RFC section 5 percent from `ready_section_5_reliability_operations`.
+- Before stopping work on section 5, check `ready_section_5_reliability_operations`.
+- If `ready_section_5_reliability_operations != 100%` and there are no blocking questions for the user, continue execution using `dispatching-parallel-agents`.

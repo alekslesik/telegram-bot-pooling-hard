@@ -121,6 +121,7 @@ Important: ensure DB user password and `VPS_POSTGRES_PASSWORD` stay in sync.
 ## 4) Alerting contract (minimum)
 
 Alert sources should be simple and operationally actionable.
+Webhook contract and tuning: `docs/ops/reliability-alerts.md`.
 
 ### Readiness (`/readyz`)
 

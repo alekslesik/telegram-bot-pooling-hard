@@ -3,13 +3,19 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/bot"
+	"github.com/alekslesik/telegram-bot-pooling-hard/internal/health"
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/logging"
 	"github.com/alekslesik/telegram-bot-pooling-hard/internal/repository"
 )
@@ -58,10 +64,36 @@ type stubTelegram struct {
 type fakeDedup struct {
 	duplicate bool
 	err       error
+	seenIDs   map[int]struct{}
+	seenKeys  map[string]struct{}
 }
 
-func (f fakeDedup) Seen(_ context.Context, _ int) (bool, error) {
+func (f *fakeDedup) Seen(_ context.Context, updateID int) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	if f.seenIDs != nil {
+		if _, ok := f.seenIDs[updateID]; ok {
+			return true, nil
+		}
+		f.seenIDs[updateID] = struct{}{}
+		return false, nil
+	}
 	return f.duplicate, f.err
+}
+
+func (f *fakeDedup) SeenKey(_ context.Context, key string) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	if f.seenKeys != nil {
+		if _, ok := f.seenKeys[key]; ok {
+			return true, nil
+		}
+		f.seenKeys[key] = struct{}{}
+		return false, nil
+	}
+	return f.duplicate, nil
 }
 
 type fakeLimiter struct {
@@ -71,6 +103,17 @@ type fakeLimiter struct {
 
 func (f fakeLimiter) Allow(_ context.Context, _ int64, _ string) (bool, error) {
 	return f.allowed, f.err
+}
+
+type spyLimiter struct {
+	allowed bool
+	err     error
+	calls   int
+}
+
+func (s *spyLimiter) Allow(_ context.Context, _ int64, _ string) (bool, error) {
+	s.calls++
+	return s.allowed, s.err
 }
 
 const errUnexpectedFmt = "unexpected error: %v"
@@ -135,7 +178,7 @@ func TestDispatchTelegramUpdate_DropsDuplicate(t *testing.T) {
 	dispatchTelegramUpdate(context.Background(), logging.NewWithWriter(&bytes.Buffer{}), &h, tgbotapi.Update{
 		UpdateID: 777,
 		Message:  &tgbotapi.Message{From: &tgbotapi.User{ID: 1}, Chat: &tgbotapi.Chat{ID: 1}, Text: "x"},
-	}, fakeDedup{duplicate: true}, nil, nil)
+	}, dispatchGuards{dedup: &fakeDedup{duplicate: true}})
 	if st.last != nil {
 		t.Fatalf("expected duplicate update to be dropped, got %T", st.last)
 	}
@@ -147,7 +190,7 @@ func TestDispatchTelegramUpdate_DropsRateLimitedMessage(t *testing.T) {
 	dispatchTelegramUpdate(context.Background(), logging.NewWithWriter(&bytes.Buffer{}), &h, tgbotapi.Update{
 		UpdateID: 778,
 		Message:  &tgbotapi.Message{From: &tgbotapi.User{ID: 1}, Chat: &tgbotapi.Chat{ID: 1}, Text: "x"},
-	}, nil, fakeLimiter{allowed: false}, nil)
+	}, dispatchGuards{msgLimiter: fakeLimiter{allowed: false}})
 	if st.last != nil {
 		t.Fatalf("expected rate-limited message to be dropped, got %T", st.last)
 	}
@@ -159,9 +202,339 @@ func TestDispatchTelegramUpdate_AllowsWhenLimiterErrors(t *testing.T) {
 	dispatchTelegramUpdate(context.Background(), logging.NewWithWriter(&bytes.Buffer{}), &h, tgbotapi.Update{
 		UpdateID: 779,
 		Message:  &tgbotapi.Message{From: &tgbotapi.User{ID: 1}, Chat: &tgbotapi.Chat{ID: 1}, Text: "x"},
-	}, nil, fakeLimiter{err: errors.New("boom")}, nil)
+	}, dispatchGuards{msgLimiter: fakeLimiter{err: errors.New("boom")}})
 	if st.last == nil {
 		t.Fatal("expected update to pass through when limiter fails")
+	}
+}
+
+func TestDispatchTelegramUpdate_DropsGlobalRateLimitedMessage(t *testing.T) {
+	st := &stubTelegram{}
+	h := bot.Handlers{Bot: st, Logger: logging.NewWithWriter(&bytes.Buffer{})}
+	dispatchTelegramUpdate(context.Background(), logging.NewWithWriter(&bytes.Buffer{}), &h, tgbotapi.Update{
+		UpdateID: 780,
+		Message:  &tgbotapi.Message{From: &tgbotapi.User{ID: 10}, Chat: &tgbotapi.Chat{ID: 10}, Text: "x"},
+	}, dispatchGuards{
+		globalLimiter: fakeLimiter{allowed: false},
+		msgLimiter:    fakeLimiter{allowed: true},
+	})
+	if st.last != nil {
+		t.Fatalf("expected globally rate-limited message to be dropped, got %T", st.last)
+	}
+}
+
+func TestDispatchTelegramUpdate_DropsBlocklistedUserBeforeLimiters(t *testing.T) {
+	st := &stubTelegram{}
+	h := bot.Handlers{Bot: st, Logger: logging.NewWithWriter(&bytes.Buffer{})}
+	global := &spyLimiter{allowed: true}
+	msg := &spyLimiter{allowed: true}
+	dispatchTelegramUpdate(context.Background(), logging.NewWithWriter(&bytes.Buffer{}), &h, tgbotapi.Update{
+		UpdateID: 781,
+		Message:  &tgbotapi.Message{From: &tgbotapi.User{ID: 999}, Chat: &tgbotapi.Chat{ID: 999}, Text: "x"},
+	}, dispatchGuards{
+		globalLimiter: global,
+		msgLimiter:    msg,
+		blocklist:     map[int64]struct{}{999: {}},
+	})
+	if st.last != nil {
+		t.Fatalf("expected blocklisted message to be dropped, got %T", st.last)
+	}
+	if global.calls != 0 || msg.calls != 0 {
+		t.Fatalf("expected limiters not called for blocklisted user, global=%d msg=%d", global.calls, msg.calls)
+	}
+}
+
+func TestDispatchTelegramUpdate_DropsDuplicateCallbackID(t *testing.T) {
+	st := &stubTelegram{}
+	h := bot.Handlers{Bot: st, Logger: logging.NewWithWriter(&bytes.Buffer{})}
+	dedup := &fakeDedup{seenIDs: map[int]struct{}{}, seenKeys: map[string]struct{}{}}
+	logger := logging.NewWithWriter(&bytes.Buffer{})
+
+	update := tgbotapi.Update{
+		UpdateID: 9001,
+		CallbackQuery: &tgbotapi.CallbackQuery{
+			ID:   "cb-1",
+			From: &tgbotapi.User{ID: 1},
+			Message: &tgbotapi.Message{
+				Chat: &tgbotapi.Chat{ID: 2},
+			},
+			Data: "cmd:ping",
+		},
+	}
+	dispatchTelegramUpdate(context.Background(), logger, &h, update, dispatchGuards{dedup: dedup})
+	if st.last == nil {
+		t.Fatal("expected first callback update to pass")
+	}
+
+	st.last = nil
+	update.UpdateID = 9002
+	dispatchTelegramUpdate(context.Background(), logger, &h, update, dispatchGuards{dedup: dedup})
+	if st.last != nil {
+		t.Fatalf("expected duplicate callback id to be dropped, got %T", st.last)
+	}
+}
+
+func TestDispatchTelegramUpdate_DropsDuplicateChatMessageID(t *testing.T) {
+	st := &stubTelegram{}
+	h := bot.Handlers{Bot: st, Logger: logging.NewWithWriter(&bytes.Buffer{})}
+	dedup := &fakeDedup{seenIDs: map[int]struct{}{}, seenKeys: map[string]struct{}{}}
+	logger := logging.NewWithWriter(&bytes.Buffer{})
+
+	update := tgbotapi.Update{
+		UpdateID: 9101,
+		Message: &tgbotapi.Message{
+			MessageID: 77,
+			From:      &tgbotapi.User{ID: 1},
+			Chat:      &tgbotapi.Chat{ID: 101},
+			Text:      "hello",
+		},
+	}
+	dispatchTelegramUpdate(context.Background(), logger, &h, update, dispatchGuards{dedup: dedup})
+	if st.last == nil {
+		t.Fatal("expected first message update to pass")
+	}
+
+	st.last = nil
+	update.UpdateID = 9102
+	dispatchTelegramUpdate(context.Background(), logger, &h, update, dispatchGuards{dedup: dedup})
+	if st.last != nil {
+		t.Fatalf("expected duplicate chat/message id to be dropped, got %T", st.last)
+	}
+}
+
+func TestPostReliabilityAlert_DispatchesExpectedPayload(t *testing.T) {
+	gotPayload := make(chan map[string]any, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() { _ = r.Body.Close() }()
+		if r.Method != http.MethodPost {
+			t.Errorf("unexpected method: %s", r.Method)
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+			t.Errorf("unexpected content-type: %s", ct)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode payload: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		gotPayload <- payload
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	err := postReliabilityAlert(context.Background(), srv.URL, "dedup_check_error", "telegram update dedup failed", map[string]any{
+		"update_id": float64(123),
+		"dedup_key": "update:123",
+	})
+	if err != nil {
+		t.Fatalf("postReliabilityAlert returned error: %v", err)
+	}
+
+	var payload map[string]any
+	select {
+	case payload = <-gotPayload:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for webhook payload")
+	}
+	if payload["event"] != "dedup_check_error" {
+		t.Fatalf("unexpected event: %#v", payload["event"])
+	}
+	if payload["message"] != "telegram update dedup failed" {
+		t.Fatalf("unexpected message: %#v", payload["message"])
+	}
+	contextObj, ok := payload["context"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected context object, got %T", payload["context"])
+	}
+	if contextObj["dedup_key"] != "update:123" {
+		t.Fatalf("unexpected dedup_key: %#v", contextObj["dedup_key"])
+	}
+}
+
+func TestPostReliabilityAlert_ReturnsErrorOnNon2xx(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	err := postReliabilityAlert(context.Background(), srv.URL, "global_limiter_check_error", "telegram global rate limit check failed", map[string]any{
+		"telegram_user_id": float64(77),
+	})
+	if err == nil {
+		t.Fatal("expected non-2xx response to return error")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expected two attempts on non-2xx, got %d", got)
+	}
+}
+
+func TestPostReliabilityAlert_RetriesAndSucceeds(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := calls.Add(1)
+		if n == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	err := postReliabilityAlert(context.Background(), srv.URL, "dedup_check_error", "telegram update dedup failed", map[string]any{
+		"update_id": float64(42),
+	})
+	if err != nil {
+		t.Fatalf("expected retry to succeed, got error: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expected second attempt to be used, got calls=%d", got)
+	}
+}
+
+func TestReliabilityAlertEmitter_ThrottlesSameEvent(t *testing.T) {
+	var calls atomic.Int32
+	received := make(chan string, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() { _ = r.Body.Close() }()
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		evt, _ := payload["event"].(string)
+		calls.Add(1)
+		received <- evt
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
+	var nowMu sync.Mutex
+	emitter := newReliabilityAlertEmitterWithClock(
+		srv.URL,
+		logging.NewWithWriter(&bytes.Buffer{}),
+		func() time.Time {
+			nowMu.Lock()
+			defer nowMu.Unlock()
+			return now
+		},
+		60*time.Second,
+	)
+
+	emitter("global_limiter_check_error", "msg", nil)
+	emitter("global_limiter_check_error", "msg", nil) // should be throttled
+	emitter("health_server_startup_failure", "msg", nil)
+
+	deadline := time.After(2 * time.Second)
+	for calls.Load() < 2 {
+		select {
+		case <-received:
+		case <-deadline:
+			t.Fatalf("timeout waiting for expected webhook calls, got=%d", calls.Load())
+		}
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expected only two calls before throttle window expires, got %d", got)
+	}
+
+	nowMu.Lock()
+	now = now.Add(61 * time.Second)
+	nowMu.Unlock()
+	emitter("global_limiter_check_error", "msg", nil)
+
+	deadline = time.After(2 * time.Second)
+	for calls.Load() < 3 {
+		select {
+		case <-received:
+		case <-deadline:
+			t.Fatalf("timeout waiting for post-window call, got=%d", calls.Load())
+		}
+	}
+}
+
+func TestRunReadinessMonitor_AlertsOnlyOnTransitions(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	ticks := make(chan time.Time, 8)
+	states := []bool{
+		true,  // initial baseline
+		true,  // no transition
+		false, // degraded
+		false, // no transition
+		true,  // recovered
+	}
+	var mu sync.Mutex
+	check := func() (health.ReadinessSnapshot, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		ready := true
+		if len(states) > 0 {
+			ready = states[0]
+			states = states[1:]
+		}
+		status := "ready"
+		if !ready {
+			status = "not_ready"
+		}
+		return health.ReadinessSnapshot{
+			Status: status,
+			Checks: map[string]health.ReadinessCheck{
+				"database": {OK: ready, Detail: "test"},
+				"redis":    {OK: ready, Detail: "test"},
+				"outbox":   {OK: true, Detail: "enabled"},
+			},
+		}, ready
+	}
+
+	type emission struct {
+		event string
+		msg   string
+	}
+	got := make(chan emission, 4)
+	alert := func(event, message string, _ map[string]any) {
+		got <- emission{event: event, msg: message}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runReadinessMonitor(ctx, logging.NewWithWriter(&bytes.Buffer{}), ticks, check, alert)
+	}()
+
+	ticks <- time.Now()
+	ticks <- time.Now()
+	ticks <- time.Now()
+	ticks <- time.Now()
+
+	var events []emission
+	deadline := time.After(2 * time.Second)
+	for len(events) < 2 {
+		select {
+		case e := <-got:
+			events = append(events, e)
+		case <-deadline:
+			t.Fatalf("timeout waiting for transition alerts, got=%d", len(events))
+		}
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected exactly 2 transition alerts, got=%d", len(events))
+	}
+	if events[0].event != "readiness_degraded" {
+		t.Fatalf("expected first transition to degraded, got=%q", events[0].event)
+	}
+	if events[1].event != "readiness_recovered" {
+		t.Fatalf("expected second transition to recovered, got=%q", events[1].event)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("monitor did not stop on context cancellation")
 	}
 }
 
@@ -209,6 +582,27 @@ func TestTelegramRateLimitConfigValues(t *testing.T) {
 	msg, callback := telegramRateLimitConfig()
 	if msg != 5 || callback != 7 {
 		t.Fatalf("unexpected config: msg=%d callback=%d", msg, callback)
+	}
+}
+
+func TestTelegramGlobalRateLimitPerMinute(t *testing.T) {
+	t.Setenv("TELEGRAM_RATE_LIMIT_GLOBAL_PER_MIN", "11")
+	if got := telegramGlobalRateLimitPerMinute(); got != 11 {
+		t.Fatalf("unexpected global rate limit: %d", got)
+	}
+}
+
+func TestTelegramBlocklistUserIDs(t *testing.T) {
+	t.Setenv("TELEGRAM_BLOCKLIST_USER_IDS", " 1001, bad, 1002 ,,1001 ")
+	ids := telegramBlocklistUserIDs()
+	if _, ok := ids[1001]; !ok {
+		t.Fatal("expected 1001 in blocklist")
+	}
+	if _, ok := ids[1002]; !ok {
+		t.Fatal("expected 1002 in blocklist")
+	}
+	if len(ids) != 2 {
+		t.Fatalf("expected exactly two unique IDs, got %d", len(ids))
 	}
 }
 
