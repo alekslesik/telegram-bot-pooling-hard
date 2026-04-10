@@ -105,6 +105,10 @@ func (s *BookingService) AdminAnalyticsReport(ctx context.Context, adminUserID i
 	if err != nil {
 		return "", err
 	}
+	retentionUsers, err := s.repo.CountRetentionUsersSince(ctx, since)
+	if err != nil {
+		return "", err
+	}
 	outbox, err := s.repo.CountOutboxByStatus(ctx)
 	if err != nil {
 		return "", err
@@ -135,6 +139,7 @@ func (s *BookingService) AdminAnalyticsReport(ctx context.Context, adminUserID i
 		fmt.Sprintf("- cancellations: %d", cancellations),
 		fmt.Sprintf("- no_show_proxy: %d", noShowProxy),
 		fmt.Sprintf("- referral_rewards_granted: %d", referralRewardsGranted),
+		fmt.Sprintf("- retention_users: %d", retentionUsers),
 	}
 	outboxTail := []string{
 		fmt.Sprintf("- outbox_pending: %d", outbox["pending"]),
