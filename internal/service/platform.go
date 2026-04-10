@@ -73,7 +73,7 @@ func (s *BookingService) AccountCabinet(ctx context.Context, userID int64) (bala
 	return p.BalanceCents, p.ReferralCode, nil
 }
 
-func (s *BookingService) AdminAnalyticsReport(ctx context.Context, adminUserID int64) (string, error) {
+func (s *BookingService) AdminAnalyticsReport(ctx context.Context, adminUserID int64, days int, specialtyID *int64) (string, error) {
 	caps, err := s.AdminCapabilities(ctx, adminUserID)
 	if err != nil {
 		return "", err
@@ -81,8 +81,27 @@ func (s *BookingService) AdminAnalyticsReport(ctx context.Context, adminUserID i
 	if !caps.CanViewAnalytics {
 		return "", fmt.Errorf("not admin")
 	}
-	since := time.Now().UTC().Add(-7 * 24 * time.Hour)
+	if days <= 0 {
+		days = 7
+	}
+	since := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
 	counts, err := s.repo.CountAnalyticsByEventSince(ctx, since)
+	if err != nil {
+		return "", err
+	}
+	confirmedBookings, err := s.repo.CountBookingsConfirmedSinceWithOptionalSpecialty(ctx, since, specialtyID)
+	if err != nil {
+		return "", err
+	}
+	cancellations, err := s.repo.CountClinicBookingsCancelledSince(ctx, since)
+	if err != nil {
+		return "", err
+	}
+	noShowProxy, err := s.repo.CountNoShowProxySince(ctx, since)
+	if err != nil {
+		return "", err
+	}
+	referralRewardsGranted, err := s.repo.CountReferralRewardsGrantedSince(ctx, since)
 	if err != nil {
 		return "", err
 	}
@@ -98,6 +117,25 @@ func (s *BookingService) AdminAnalyticsReport(ctx context.Context, adminUserID i
 	if err != nil {
 		return "", err
 	}
+	segment := "all"
+	if specialtyID != nil {
+		segment = fmt.Sprintf("specialty_id=%d", *specialtyID)
+	}
+	specSelected := counts["funnel_book_specialty_selected"]
+	conversion := "0.00"
+	if specSelected > 0 {
+		conversion = fmt.Sprintf("%.2f", float64(confirmedBookings)/float64(specSelected))
+	}
+	funnelTail := []string{
+		fmt.Sprintf("- period: last %d days", days),
+		fmt.Sprintf("- segment: %s", segment),
+		fmt.Sprintf("- funnel_conversion_approx_confirmed_per_specialty_selected: %s", conversion),
+		"- funnel_conversion_note: count-based_not_unique_users",
+		fmt.Sprintf("- bookings_confirmed_total: %d", confirmedBookings),
+		fmt.Sprintf("- cancellations: %d", cancellations),
+		fmt.Sprintf("- no_show_proxy: %d", noShowProxy),
+		fmt.Sprintf("- referral_rewards_granted: %d", referralRewardsGranted),
+	}
 	outboxTail := []string{
 		fmt.Sprintf("- outbox_pending: %d", outbox["pending"]),
 		fmt.Sprintf("- outbox_processing: %d", outbox["processing"]),
@@ -109,9 +147,9 @@ func (s *BookingService) AdminAnalyticsReport(ctx context.Context, adminUserID i
 		fmt.Sprintf("- wallet_balance_mismatches: %d", walletMismatches),
 	}
 	if len(counts) == 0 {
-		return strings.Join(outboxTail, "\n"), nil
+		return strings.Join(append(funnelTail, outboxTail...), "\n"), nil
 	}
-	var lines []string
+	lines := append([]string{}, funnelTail...)
 	for k, v := range counts {
 		lines = append(lines, fmt.Sprintf("- %s: %d", k, v))
 	}
