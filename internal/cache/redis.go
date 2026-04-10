@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"time"
@@ -44,6 +45,32 @@ func (r *Redis) Set(ctx context.Context, key string, val string, ttl time.Durati
 		return nil
 	}
 	return r.c.Set(ctx, key, val, ttl).Err()
+}
+
+// SetNXEX stores a value only when key does not exist, with TTL.
+func (r *Redis) SetNXEX(ctx context.Context, key string, val string, ttl time.Duration) (bool, error) {
+	if r == nil || r.c == nil {
+		return false, errors.New("redis: nil client")
+	}
+	return r.c.SetNX(ctx, key, val, ttl).Result()
+}
+
+// IncrWithTTL atomically increments key and sets TTL on first increment.
+func (r *Redis) IncrWithTTL(ctx context.Context, key string, ttlSeconds int) (int64, error) {
+	if r == nil || r.c == nil {
+		return 0, errors.New("redis: nil client")
+	}
+	if ttlSeconds <= 0 {
+		return 0, errors.New("redis: ttlSeconds must be > 0")
+	}
+	const script = `
+local v = redis.call("INCR", KEYS[1])
+if v == 1 then
+  redis.call("EXPIRE", KEYS[1], ARGV[1])
+end
+return v
+`
+	return redis.NewScript(script).Run(ctx, r.c, []string{key}, ttlSeconds).Int64()
 }
 
 func (r *Redis) Close() error {

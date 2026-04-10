@@ -25,12 +25,14 @@ type readinessResponse struct {
 }
 
 type healthResponse struct {
-	Status string `json:"status"`
+	Status  string `json:"status"`
+	Version string `json:"version,omitempty"`
+	Commit  string `json:"commit,omitempty"`
 }
 
-func NewServer(addr string, db *sql.DB, redisClient *cache.Redis, outboxEnabled bool) *Server {
+func NewServer(addr string, db *sql.DB, redisClient *cache.Redis, outboxEnabled bool, version string, commit string) *Server {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", healthHandler)
+	mux.HandleFunc("/healthz", healthHandler(version, commit))
 	mux.HandleFunc("/readyz", readinessHandler(db, redisClient, outboxEnabled))
 	return &Server{
 		httpServer: &http.Server{
@@ -59,8 +61,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.httpServer.Shutdown(ctx)
 }
 
-func healthHandler(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
+func healthHandler(version string, commit string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, healthResponse{
+			Status:  "ok",
+			Version: version,
+			Commit:  commit,
+		})
+	}
 }
 
 func readinessHandler(db *sql.DB, redisClient *cache.Redis, outboxEnabled bool) http.HandlerFunc {
@@ -68,35 +76,11 @@ func readinessHandler(db *sql.DB, redisClient *cache.Redis, outboxEnabled bool) 
 		checks := map[string]checkResult{
 			"outbox": {OK: true, Detail: boolDetail(outboxEnabled, "enabled", "disabled")},
 		}
-		ready := true
-
-		if db != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			err := db.PingContext(ctx)
-			cancel()
-			if err != nil {
-				ready = false
-				checks["database"] = checkResult{OK: false, Detail: "ping failed"}
-			} else {
-				checks["database"] = checkResult{OK: true, Detail: "postgres"}
-			}
-		} else {
-			checks["database"] = checkResult{OK: true, Detail: "memory"}
-		}
-
-		if redisClient != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			err := redisClient.Ping(ctx)
-			cancel()
-			if err != nil {
-				ready = false
-				checks["redis"] = checkResult{OK: false, Detail: "ping failed"}
-			} else {
-				checks["redis"] = checkResult{OK: true, Detail: "ping"}
-			}
-		} else {
-			checks["redis"] = checkResult{OK: true, Detail: "disabled"}
-		}
+		dbCheck, dbReady := databaseCheck(db)
+		checks["database"] = dbCheck
+		redisCheck, redisReady := redisReadinessCheck(redisClient)
+		checks["redis"] = redisCheck
+		ready := dbReady && redisReady
 
 		status := "ready"
 		httpCode := http.StatusOK
@@ -106,6 +90,32 @@ func readinessHandler(db *sql.DB, redisClient *cache.Redis, outboxEnabled bool) 
 		}
 		writeJSON(w, httpCode, readinessResponse{Status: status, Checks: checks})
 	}
+}
+
+func databaseCheck(db *sql.DB) (checkResult, bool) {
+	if db == nil {
+		return checkResult{OK: true, Detail: "memory"}, true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	err := db.PingContext(ctx)
+	cancel()
+	if err != nil {
+		return checkResult{OK: false, Detail: "ping failed"}, false
+	}
+	return checkResult{OK: true, Detail: "postgres"}, true
+}
+
+func redisReadinessCheck(redisClient *cache.Redis) (checkResult, bool) {
+	if redisClient == nil {
+		return checkResult{OK: true, Detail: "disabled"}, true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	err := redisClient.Ping(ctx)
+	cancel()
+	if err != nil {
+		return checkResult{OK: false, Detail: "ping failed"}, false
+	}
+	return checkResult{OK: true, Detail: "ping"}, true
 }
 
 func boolDetail(v bool, yes, no string) string {
