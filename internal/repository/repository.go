@@ -319,6 +319,7 @@ type BookingRepository interface {
 	CountNoShowProxySince(ctx context.Context, since time.Time) (int64, error)
 	CountReferralRewardsGrantedSince(ctx context.Context, since time.Time) (int64, error)
 	CountBookingsConfirmedSinceWithOptionalSpecialty(ctx context.Context, since time.Time, specialtyID *int64) (int64, error)
+	CountRetentionUsersSince(ctx context.Context, since time.Time) (int64, error)
 	ConfirmPaidClinicBooking(ctx context.Context, userID, feeCents, specialtyID, doctorID, slotID int64, operationID string) (PaidBookingResult, error)
 	ApplyTelegramStarsTopUp(ctx context.Context, userID, starsCount, kopeksPerStar int64, telegramPaymentChargeID, metadataJSON string) (StarsTopUpResult, error)
 	UpsertWalletBalanceReadModel(ctx context.Context, userID int64, balanceCents int64, lastTxID *int64) error
@@ -1717,6 +1718,33 @@ func (r *MemoryRepository) CountBookingsConfirmedSinceWithOptionalSpecialty(_ co
 		count++
 	}
 	return count, nil
+}
+
+func (r *MemoryRepository) CountRetentionUsersSince(_ context.Context, since time.Time) (int64, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	started := make(map[int64]struct{})
+	confirmed := make(map[int64]struct{})
+	for _, e := range r.analyticsEvents {
+		if e.CreatedAt.Before(since) || e.UserID == nil {
+			continue
+		}
+		switch e.EventType {
+		case "cmd_start":
+			started[*e.UserID] = struct{}{}
+		case "booking_confirmed":
+			confirmed[*e.UserID] = struct{}{}
+		}
+	}
+
+	var retention int64
+	for userID := range started {
+		if _, ok := confirmed[userID]; ok {
+			retention++
+		}
+	}
+	return retention, nil
 }
 
 func (r *MemoryRepository) ConfirmPaidClinicBooking(_ context.Context, userID, feeCents, specialtyID, doctorID, slotID int64, operationID string) (PaidBookingResult, error) {

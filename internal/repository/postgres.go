@@ -1502,6 +1502,25 @@ func (r *PostgresRepository) CountBookingsConfirmedSinceWithOptionalSpecialty(ct
 	return count, err
 }
 
+func (r *PostgresRepository) CountRetentionUsersSince(ctx context.Context, since time.Time) (int64, error) {
+	var count int64
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM (
+			SELECT s.telegram_user_id
+			FROM analytics_events s
+			INNER JOIN analytics_events b
+				ON b.telegram_user_id = s.telegram_user_id
+			WHERE s.event_type = 'cmd_start'
+			  AND b.event_type = 'booking_confirmed'
+			  AND s.created_at >= $1
+			  AND b.created_at >= $1
+			  AND s.telegram_user_id IS NOT NULL
+			GROUP BY s.telegram_user_id
+		) retained`, since).Scan(&count)
+	return count, err
+}
+
 func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userID, feeCents, specialtyID, doctorID, slotID int64, operationID string) (PaidBookingResult, error) {
 	if err := r.ensureOutboxSchema(ctx); err != nil {
 		return PaidBookingResult{}, err

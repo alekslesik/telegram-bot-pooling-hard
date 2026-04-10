@@ -55,6 +55,9 @@ func TestBookingServiceAdminAnalyticsReportIncludesPeriodSegmentAndAggregates(t 
 	if err := svc.LogAnalytics(ctx, &uidp, "funnel_book_specialty_selected", `{"specialty_id":1}`); err != nil {
 		t.Fatalf("log analytics funnel #2: %v", err)
 	}
+	if err := svc.LogAnalytics(ctx, &uidp, "cmd_start", `{}`); err != nil {
+		t.Fatalf("log analytics cmd_start: %v", err)
+	}
 	if err := svc.LogAnalytics(ctx, &uidp, "booking_confirmed", `{"spec_id":1,"doc_id":1,"slot_id":1}`); err != nil {
 		t.Fatalf("log analytics booking_confirmed: %v", err)
 	}
@@ -72,11 +75,15 @@ func TestBookingServiceAdminAnalyticsReportIncludesPeriodSegmentAndAggregates(t 
 		"cancellations:",
 		"no_show_proxy:",
 		"referral_rewards_granted:",
+		"retention_users:",
 		"outbox_pending:",
 		"wallet_balance_mismatches:",
 	} {
 		if !strings.Contains(report, needle) {
 			t.Fatalf("expected report to contain %q, got:\n%s", needle, report)
 		}
+	}
+	if !strings.Contains(report, "retention_users: 1") {
+		t.Fatalf("expected non-zero retention metric in report, got:\n%s", report)
 	}
 }

@@ -323,6 +323,40 @@ func TestMemoryRepositoryCountWalletBalanceMismatches(t *testing.T) {
 	}
 }
 
+func TestMemoryRepositoryCountRetentionUsersSince(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	nowWindow := time.Now().UTC().Add(-time.Hour)
+
+	userRetained := int64(9101)
+	userOnlyStart := int64(9102)
+	userOnlyBooking := int64(9103)
+
+	if err := repo.LogAnalyticsEvent(ctx, &userRetained, "cmd_start", `{}`); err != nil {
+		t.Fatalf("log cmd_start retained: %v", err)
+	}
+	if err := repo.LogAnalyticsEvent(ctx, &userRetained, "booking_confirmed", `{}`); err != nil {
+		t.Fatalf("log booking_confirmed retained: %v", err)
+	}
+	if err := repo.LogAnalyticsEvent(ctx, &userOnlyStart, "cmd_start", `{}`); err != nil {
+		t.Fatalf("log cmd_start only: %v", err)
+	}
+	if err := repo.LogAnalyticsEvent(ctx, &userOnlyBooking, "booking_confirmed", `{}`); err != nil {
+		t.Fatalf("log booking_confirmed only: %v", err)
+	}
+	if err := repo.LogAnalyticsEvent(ctx, nil, "cmd_start", `{}`); err != nil {
+		t.Fatalf("log anonymous cmd_start: %v", err)
+	}
+
+	got, err := repo.CountRetentionUsersSince(ctx, nowWindow)
+	if err != nil {
+		t.Fatalf("count retention users: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("expected retained users = 1, got %d", got)
+	}
+}
+
 func TestMemoryRepository_ConfirmPaidClinicBooking_EnqueuesRFCOutboxEvents(t *testing.T) {
 	repo := NewMemoryRepository()
 	ctx := context.Background()
