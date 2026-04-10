@@ -1063,6 +1063,61 @@ func (r *PostgresRepository) CountAnalyticsByEventSince(ctx context.Context, sin
 	return out, rows.Err()
 }
 
+func (r *PostgresRepository) CountClinicBookingsCancelledSince(ctx context.Context, since time.Time) (int64, error) {
+	var count int64
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM clinic_bookings
+		WHERE status = 'cancelled'
+		  AND cancelled_at IS NOT NULL
+		  AND cancelled_at >= $1`, since).Scan(&count)
+	return count, err
+}
+
+func (r *PostgresRepository) CountNoShowProxySince(ctx context.Context, since time.Time) (int64, error) {
+	var count int64
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM clinic_bookings cb
+		INNER JOIN doctor_slots ds ON ds.id = cb.doctor_slot_id
+		WHERE cb.status = 'confirmed'
+		  AND ds.start_at < NOW()
+		  AND ds.start_at >= $1`, since).Scan(&count)
+	return count, err
+}
+
+func (r *PostgresRepository) CountReferralRewardsGrantedSince(ctx context.Context, since time.Time) (int64, error) {
+	var count int64
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM user_profiles
+		WHERE referral_reward_granted = TRUE
+		  AND updated_at >= $1`, since).Scan(&count)
+	return count, err
+}
+
+func (r *PostgresRepository) CountBookingsConfirmedSinceWithOptionalSpecialty(ctx context.Context, since time.Time, specialtyID *int64) (int64, error) {
+	var (
+		count int64
+		err   error
+	)
+	if specialtyID == nil {
+		err = r.db.QueryRowContext(ctx, `
+			SELECT COUNT(*)
+			FROM clinic_bookings
+			WHERE status = 'confirmed'
+			  AND created_at >= $1`, since).Scan(&count)
+	} else {
+		err = r.db.QueryRowContext(ctx, `
+			SELECT COUNT(*)
+			FROM clinic_bookings
+			WHERE status = 'confirmed'
+			  AND created_at >= $1
+			  AND specialty_id = $2`, since, *specialtyID).Scan(&count)
+	}
+	return count, err
+}
+
 func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userID, feeCents, specialtyID, doctorID, slotID int64, operationID string) (PaidBookingResult, error) {
 	if err := r.ensureOutboxSchema(ctx); err != nil {
 		return PaidBookingResult{}, err

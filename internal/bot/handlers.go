@@ -896,7 +896,7 @@ func (h Handlers) handleAdminCallback(q *tgbotapi.CallbackQuery) {
 	case "dayslots":
 		text, err = h.Booking.StartAdminDaySlots(context.Background(), userID)
 	case "analytics":
-		report, errAn := h.Booking.AdminAnalyticsReport(context.Background(), userID)
+		report, errAn := h.Booking.AdminAnalyticsReport(context.Background(), userID, 7, nil)
 		err = nil
 		if errAn != nil {
 			text = "Нет доступа к аналитике."

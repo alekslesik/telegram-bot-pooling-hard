@@ -262,6 +262,10 @@ type BookingRepository interface {
 	GrantReferralRewardsOnRegistration(ctx context.Context, userID, refereeBonusCents, referrerBonusCents int64) error
 	LogAnalyticsEvent(ctx context.Context, userID *int64, eventType, payloadJSON string) error
 	CountAnalyticsByEventSince(ctx context.Context, since time.Time) (map[string]int64, error)
+	CountClinicBookingsCancelledSince(ctx context.Context, since time.Time) (int64, error)
+	CountNoShowProxySince(ctx context.Context, since time.Time) (int64, error)
+	CountReferralRewardsGrantedSince(ctx context.Context, since time.Time) (int64, error)
+	CountBookingsConfirmedSinceWithOptionalSpecialty(ctx context.Context, since time.Time, specialtyID *int64) (int64, error)
 	ConfirmPaidClinicBooking(ctx context.Context, userID, feeCents, specialtyID, doctorID, slotID int64, operationID string) (PaidBookingResult, error)
 	UpsertWalletBalanceReadModel(ctx context.Context, userID int64, balanceCents int64, lastTxID *int64) error
 	GetWalletBalanceReadModel(ctx context.Context, userID int64) (WalletBalanceReadModel, error)
@@ -1369,6 +1373,69 @@ func (r *MemoryRepository) CountAnalyticsByEventSince(_ context.Context, since t
 		out[e.EventType]++
 	}
 	return out, nil
+}
+
+func (r *MemoryRepository) CountClinicBookingsCancelledSince(_ context.Context, since time.Time) (int64, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var count int64
+	for _, b := range r.clinicBooking {
+		if b.Status != "cancelled" || b.CancelledAt == nil {
+			continue
+		}
+		if !b.CancelledAt.Before(since) {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (r *MemoryRepository) CountNoShowProxySince(_ context.Context, since time.Time) (int64, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	now := time.Now().UTC()
+	var count int64
+	for _, b := range r.clinicBooking {
+		if b.Status != "confirmed" {
+			continue
+		}
+		slot, ok := r.doctorSlots[b.DoctorSlotID]
+		if !ok {
+			continue
+		}
+		if slot.StartAt.Before(now) && !slot.StartAt.Before(since) {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (r *MemoryRepository) CountReferralRewardsGrantedSince(_ context.Context, since time.Time) (int64, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var count int64
+	for _, p := range r.userProfiles {
+		if p.ReferralRewardGranted && !p.UpdatedAt.Before(since) {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (r *MemoryRepository) CountBookingsConfirmedSinceWithOptionalSpecialty(_ context.Context, since time.Time, specialtyID *int64) (int64, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var count int64
+	for _, b := range r.clinicBooking {
+		if b.Status != "confirmed" || b.CreatedAt.Before(since) {
+			continue
+		}
+		if specialtyID != nil && b.SpecialtyID != *specialtyID {
+			continue
+		}
+		count++
+	}
+	return count, nil
 }
 
 func (r *MemoryRepository) ConfirmPaidClinicBooking(_ context.Context, userID, feeCents, specialtyID, doctorID, slotID int64, operationID string) (PaidBookingResult, error) {
