@@ -58,19 +58,11 @@ func formatBuildDate(raw string) string {
 }
 
 func applyTelegramUpdate(h *bot.Handlers, u tgbotapi.Update) {
-	if u.PreCheckoutQuery != nil {
-		h.HandlePreCheckout(u.PreCheckoutQuery)
-		return
-	}
 	if u.CallbackQuery != nil {
 		h.HandleCallback(u.CallbackQuery)
 		return
 	}
 	if u.Message == nil {
-		return
-	}
-	if u.Message.SuccessfulPayment != nil {
-		h.HandleSuccessfulPayment(u.Message)
 		return
 	}
 	h.HandleMessage(u.Message)

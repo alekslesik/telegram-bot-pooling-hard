@@ -165,53 +165,6 @@ func TestDispatchTelegramUpdate_AllowsWhenLimiterErrors(t *testing.T) {
 	}
 }
 
-func TestApplyTelegramUpdate_preCheckoutHandledFirst(t *testing.T) {
-	st := &stubTelegram{}
-	h := bot.Handlers{
-		Bot:    st,
-		Logger: logging.NewWithWriter(&bytes.Buffer{}),
-	}
-	applyTelegramUpdate(&h, tgbotapi.Update{
-		PreCheckoutQuery: &tgbotapi.PreCheckoutQuery{
-			ID:             "pcq-main",
-			Currency:       "XTR",
-			TotalAmount:    25,
-			InvoicePayload: "any",
-			From:           &tgbotapi.User{ID: 10},
-		},
-		Message: &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: 1}, Text: "should-not-run"},
-	})
-	if _, ok := st.last.(tgbotapi.PreCheckoutConfig); !ok {
-		t.Fatalf("expected pre-checkout response, got %T", st.last)
-	}
-}
-
-func TestApplyTelegramUpdate_successfulPaymentHandled(t *testing.T) {
-	st := &stubTelegram{}
-	h := bot.Handlers{
-		Bot:    st,
-		Logger: logging.NewWithWriter(&bytes.Buffer{}),
-	}
-	applyTelegramUpdate(&h, tgbotapi.Update{
-		Message: &tgbotapi.Message{
-			Chat: &tgbotapi.Chat{ID: 1},
-			From: &tgbotapi.User{ID: 1, LanguageCode: "en"},
-			SuccessfulPayment: &tgbotapi.SuccessfulPayment{
-				Currency:       "XTR",
-				TotalAmount:    10,
-				InvoicePayload: "x",
-			},
-		},
-	})
-	cfg, ok := st.last.(tgbotapi.MessageConfig)
-	if !ok {
-		t.Fatalf("expected payment message, got %T", st.last)
-	}
-	if cfg.Text == "" {
-		t.Fatal("expected non-empty payment reply")
-	}
-}
-
 func TestLogAuthorized_withExpectedUsername(t *testing.T) {
 	var buf bytes.Buffer
 	logAuthorized(logging.NewWithWriter(&buf), "want", "got")
