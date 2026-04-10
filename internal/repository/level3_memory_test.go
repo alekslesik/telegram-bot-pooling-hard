@@ -323,6 +323,40 @@ func TestMemoryRepositoryCountWalletBalanceMismatches(t *testing.T) {
 	}
 }
 
+func TestMemoryRepositoryCountRetentionUsersSince(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	nowWindow := time.Now().UTC().Add(-time.Hour)
+
+	userRetained := int64(9101)
+	userOnlyStart := int64(9102)
+	userOnlyBooking := int64(9103)
+
+	if err := repo.LogAnalyticsEvent(ctx, &userRetained, "cmd_start", `{}`); err != nil {
+		t.Fatalf("log cmd_start retained: %v", err)
+	}
+	if err := repo.LogAnalyticsEvent(ctx, &userRetained, "booking_confirmed", `{}`); err != nil {
+		t.Fatalf("log booking_confirmed retained: %v", err)
+	}
+	if err := repo.LogAnalyticsEvent(ctx, &userOnlyStart, "cmd_start", `{}`); err != nil {
+		t.Fatalf("log cmd_start only: %v", err)
+	}
+	if err := repo.LogAnalyticsEvent(ctx, &userOnlyBooking, "booking_confirmed", `{}`); err != nil {
+		t.Fatalf("log booking_confirmed only: %v", err)
+	}
+	if err := repo.LogAnalyticsEvent(ctx, nil, "cmd_start", `{}`); err != nil {
+		t.Fatalf("log anonymous cmd_start: %v", err)
+	}
+
+	got, err := repo.CountRetentionUsersSince(ctx, nowWindow)
+	if err != nil {
+		t.Fatalf("count retention users: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("expected retained users = 1, got %d", got)
+	}
+}
+
 func TestMemoryRepository_ConfirmPaidClinicBooking_EnqueuesRFCOutboxEvents(t *testing.T) {
 	repo := NewMemoryRepository()
 	ctx := context.Background()
@@ -342,5 +376,59 @@ func TestMemoryRepository_ConfirmPaidClinicBooking_EnqueuesRFCOutboxEvents(t *te
 	repo.mu.RUnlock()
 	if seen["booking_created"] != 1 || seen["payment_confirmed"] != 1 {
 		t.Fatalf("expected booking_created and payment_confirmed once each, got %+v", seen)
+	}
+}
+
+func TestMemoryRepository_ListWalletTransactionsForReconciliation_ByPrefixAndProvider(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	const userID int64 = 9301
+	if _, err := repo.EnsureUserProfile(ctx, userID); err != nil {
+		t.Fatal(err)
+	}
+
+	repo.mu.Lock()
+	repo.walletTx[10] = WalletTransaction{
+		ID:             10,
+		TelegramUserID: userID,
+		OperationID:    "tg_stars:booking:1",
+		TxType:         "credit",
+		AmountCents:    200,
+		MetadataJSON:   `{"provider":"telegram_stars"}`,
+		CreatedAt:      time.Now().UTC(),
+	}
+	repo.walletTx[11] = WalletTransaction{
+		ID:             11,
+		TelegramUserID: userID,
+		OperationID:    "tg_stars:booking:2",
+		TxType:         "credit",
+		AmountCents:    300,
+		MetadataJSON:   `{"provider":"external_psp"}`,
+		CreatedAt:      time.Now().UTC(),
+	}
+	repo.walletTx[12] = WalletTransaction{
+		ID:             12,
+		TelegramUserID: userID,
+		OperationID:    "clinic_booking:confirm:9301:1",
+		TxType:         "debit",
+		AmountCents:    -100,
+		MetadataJSON:   `{}`,
+		CreatedAt:      time.Now().UTC(),
+	}
+	repo.mu.Unlock()
+
+	got, err := repo.ListWalletTransactionsForReconciliation(ctx, WalletReconciliationFilter{
+		OperationPrefix:  "tg_stars",
+		MetadataProvider: "telegram_stars",
+		Limit:            10,
+	})
+	if err != nil {
+		t.Fatalf("list reconciliation tx error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 transaction, got %d", len(got))
+	}
+	if got[0].OperationID != "tg_stars:booking:1" {
+		t.Fatalf("unexpected operation_id: %s", got[0].OperationID)
 	}
 }

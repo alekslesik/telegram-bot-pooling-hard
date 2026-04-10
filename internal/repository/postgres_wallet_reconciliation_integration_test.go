@@ -30,6 +30,44 @@ func TestPostgresRepositoryCountWalletBalanceMismatches(t *testing.T) {
 	}
 }
 
+func TestPostgresRepositoryListWalletTransactionsForReconciliation(t *testing.T) {
+	db := openReconciliationIntegrationDB(t)
+	defer db.Close()
+	prepareWalletReconciliationSchema(t, db)
+
+	ctx := context.Background()
+	repo := NewPostgresRepository(db)
+	if err := seedWalletReconciliationData(ctx, db); err != nil {
+		t.Fatalf("seed reconciliation data: %v", err)
+	}
+	_, err := db.ExecContext(ctx, `
+INSERT INTO wallet_transactions (
+  telegram_user_id, operation_id, tx_type, amount_cents, balance_before, balance_after, metadata_json
+) VALUES
+  (9001, 'tg_stars:credit:9001:1', 'credit', 200, 500, 700, '{"provider":"telegram_stars"}'::jsonb),
+  (9001, 'tg_stars:credit:9001:2', 'credit', 300, 700, 1000, '{"provider":"external_psp"}'::jsonb),
+  (9001, 'clinic_booking:confirm:9001:1', 'debit', -100, 1000, 900, '{}'::jsonb)
+`)
+	if err != nil {
+		t.Fatalf("seed reconciliation tx data: %v", err)
+	}
+
+	got, err := repo.ListWalletTransactionsForReconciliation(ctx, WalletReconciliationFilter{
+		OperationPrefix:  "tg_stars",
+		MetadataProvider: "telegram_stars",
+		Limit:            10,
+	})
+	if err != nil {
+		t.Fatalf("list reconciliation tx: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 transaction, got %d", len(got))
+	}
+	if got[0].OperationID != "tg_stars:credit:9001:1" {
+		t.Fatalf("unexpected operation id: %s", got[0].OperationID)
+	}
+}
+
 func openReconciliationIntegrationDB(t *testing.T) *sql.DB {
 	t.Helper()
 	dsn := os.Getenv("TEST_DB_DSN")

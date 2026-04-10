@@ -61,6 +61,34 @@ func TestBookingOutboxHandler_EnqueuesReminderEvent(t *testing.T) {
 	}
 }
 
+func TestBookingOutboxHandler_PaymentConfirmedMalformedPayloadGoesToRetry(t *testing.T) {
+	repo := repository.NewMemoryRepository()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	_, err := repo.EnqueueOutboxEvent(ctx, repository.OutboxEvent{
+		EventType:     "payment_confirmed",
+		AggregateType: "clinic_booking",
+		PayloadJSON:   `{"booking_id":9001,"user_id":42`,
+		AvailableAt:   now,
+	})
+	if err != nil {
+		t.Fatalf("enqueue payment_confirmed malformed payload: %v", err)
+	}
+
+	worker := NewOutboxWorker(repo, NewBookingOutboxHandler(repo, nil), 20, 80*time.Millisecond)
+	if err := worker.Tick(ctx); err != nil {
+		t.Fatalf("tick error: %v", err)
+	}
+	claims, err := repo.ClaimDueOutboxEvents(ctx, 20, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("claim immediate retry window error: %v", err)
+	}
+	if len(claims) != 0 {
+		t.Fatalf("expected malformed payload event to backoff, got %d immediate claims", len(claims))
+	}
+}
+
 func TestBookingOutboxHandler_LogsReminderAnalytics(t *testing.T) {
 	repo := repository.NewMemoryRepository()
 	ctx := context.Background()

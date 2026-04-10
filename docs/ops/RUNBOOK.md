@@ -158,3 +158,66 @@ docker compose -f docker-compose.prod.yaml logs --since=15m bot postgres
 
 - Acknowledge `critical` alert within 10 minutes.
 - Start rollback decision within 15 minutes if `/readyz` stays red after first mitigation.
+
+## 5) Payments reconciliation edge cases
+
+Use this when payment state and user balance diverge.
+
+### A) Charge succeeded, but credit/booking is missing
+
+Symptoms:
+- Payment operation is known, but there is no corresponding booking or balance update.
+
+Checks:
+
+```bash
+cd /opt/bots/telegram-bot-pooling-hard
+docker compose -f docker-compose.prod.yaml exec -T postgres psql -U "$POSTGRES_USER" "$POSTGRES_DB" -c "
+SELECT id, telegram_user_id, operation_id, tx_type, amount_cents, related_booking_id, created_at
+FROM wallet_transactions
+WHERE operation_id = '<operation_id>';
+"
+```
+
+Actions:
+1. If a `debit` exists with expected `operation_id`, do not re-charge; treat retries as idempotent.
+2. If no debit exists, collect evidence (user id, operation id, timestamps, logs) and escalate for manual correction script/replay.
+3. Verify user balance and read-model after correction.
+
+### B) Duplicate updates / duplicate payment callbacks
+
+Symptoms:
+- Same payment/update arrives multiple times.
+
+Actions:
+1. Confirm only one ledger row exists per `operation_id`.
+2. Confirm only one business booking is linked to that operation.
+3. If duplicates were dropped, keep logs and mark incident as idempotency-protected.
+
+### C) Wallet/read-model mismatch checks
+
+Checks:
+
+```bash
+cd /opt/bots/telegram-bot-pooling-hard
+docker compose -f docker-compose.prod.yaml exec -T postgres psql -U "$POSTGRES_USER" "$POSTGRES_DB" -c "
+SELECT COUNT(*) AS wallet_mismatches
+FROM user_profiles up
+LEFT JOIN wallet_balance_read_model wrm ON wrm.telegram_user_id = up.telegram_user_id
+LEFT JOIN LATERAL (
+  SELECT wt.balance_after
+  FROM wallet_transactions wt
+  WHERE wt.telegram_user_id = up.telegram_user_id
+  ORDER BY wt.id DESC
+  LIMIT 1
+) last_tx ON TRUE
+WHERE wrm.telegram_user_id IS NULL
+   OR up.balance_cents <> wrm.balance_cents
+   OR (last_tx.balance_after IS NOT NULL AND up.balance_cents <> last_tx.balance_after);
+"
+```
+
+Actions:
+1. If mismatch count is non-zero, extract affected users and freeze manual adjustments until root cause is clear.
+2. Rebuild or upsert read-model rows from latest ledger balances for affected users.
+3. Re-run mismatch query and close incident only when count returns to zero.

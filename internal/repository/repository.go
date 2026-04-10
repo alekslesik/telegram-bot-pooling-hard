@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -127,6 +128,12 @@ type WalletTransaction struct {
 	RelatedBookingID *int64
 	MetadataJSON     string
 	CreatedAt        time.Time
+}
+
+type WalletReconciliationFilter struct {
+	OperationPrefix  string
+	MetadataProvider string
+	Limit            int
 }
 
 type WalletBalanceReadModel struct {
@@ -266,6 +273,7 @@ type BookingRepository interface {
 	CountNoShowProxySince(ctx context.Context, since time.Time) (int64, error)
 	CountReferralRewardsGrantedSince(ctx context.Context, since time.Time) (int64, error)
 	CountBookingsConfirmedSinceWithOptionalSpecialty(ctx context.Context, since time.Time, specialtyID *int64) (int64, error)
+	CountRetentionUsersSince(ctx context.Context, since time.Time) (int64, error)
 	ConfirmPaidClinicBooking(ctx context.Context, userID, feeCents, specialtyID, doctorID, slotID int64, operationID string) (PaidBookingResult, error)
 	UpsertWalletBalanceReadModel(ctx context.Context, userID int64, balanceCents int64, lastTxID *int64) error
 	GetWalletBalanceReadModel(ctx context.Context, userID int64) (WalletBalanceReadModel, error)
@@ -277,6 +285,7 @@ type BookingRepository interface {
 	CountOutboxByStatus(ctx context.Context) (map[string]int64, error)
 	GetOutboxOperationalStats(ctx context.Context) (OutboxOperationalStats, error)
 	CountWalletBalanceMismatches(ctx context.Context) (int64, error)
+	ListWalletTransactionsForReconciliation(ctx context.Context, filter WalletReconciliationFilter) ([]WalletTransaction, error)
 }
 
 type MemoryRepository struct {
@@ -1438,6 +1447,33 @@ func (r *MemoryRepository) CountBookingsConfirmedSinceWithOptionalSpecialty(_ co
 	return count, nil
 }
 
+func (r *MemoryRepository) CountRetentionUsersSince(_ context.Context, since time.Time) (int64, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	started := make(map[int64]struct{})
+	confirmed := make(map[int64]struct{})
+	for _, e := range r.analyticsEvents {
+		if e.CreatedAt.Before(since) || e.UserID == nil {
+			continue
+		}
+		switch e.EventType {
+		case "cmd_start":
+			started[*e.UserID] = struct{}{}
+		case "booking_confirmed":
+			confirmed[*e.UserID] = struct{}{}
+		}
+	}
+
+	var retention int64
+	for userID := range started {
+		if _, ok := confirmed[userID]; ok {
+			retention++
+		}
+	}
+	return retention, nil
+}
+
 func (r *MemoryRepository) ConfirmPaidClinicBooking(_ context.Context, userID, feeCents, specialtyID, doctorID, slotID int64, operationID string) (PaidBookingResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1749,6 +1785,49 @@ func (r *MemoryRepository) CountWalletBalanceMismatches(_ context.Context) (int6
 		}
 	}
 	return mismatches, nil
+}
+
+func (r *MemoryRepository) ListWalletTransactionsForReconciliation(_ context.Context, filter WalletReconciliationFilter) ([]WalletTransaction, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	prefix := strings.TrimSpace(filter.OperationPrefix)
+	provider := strings.TrimSpace(filter.MetadataProvider)
+
+	type pair struct {
+		id int64
+		tx WalletTransaction
+	}
+	items := make([]pair, 0, len(r.walletTx))
+	for id, tx := range r.walletTx {
+		if prefix != "" && !strings.HasPrefix(tx.OperationID, prefix) {
+			continue
+		}
+		if provider != "" {
+			var meta map[string]any
+			if err := json.Unmarshal([]byte(tx.MetadataJSON), &meta); err != nil {
+				continue
+			}
+			rawProvider, _ := meta["provider"].(string)
+			if strings.TrimSpace(rawProvider) != provider {
+				continue
+			}
+		}
+		items = append(items, pair{id: id, tx: tx})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].id > items[j].id })
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	out := make([]WalletTransaction, 0, len(items))
+	for _, item := range items {
+		out = append(out, item.tx)
+	}
+	return out, nil
 }
 
 func (r *MemoryRepository) latestWalletBalanceForUserLocked(userID int64) (int64, bool) {

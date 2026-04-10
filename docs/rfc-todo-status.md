@@ -58,10 +58,10 @@ This file mirrors the user-maintained RFC checklist and records **implementation
 
 | Item | Status |
 |------|--------|
-| Rate limiting + anti-abuse | **Not done** |
-| Idempotent handler ops for critical paths | **Partial** — money idempotency in repo; transport/handler layer not fully covered |
-| Health/readiness + structured logs + alerting | **Partial** — health server exists |
-| Runbook (rollback, DB recovery, secret rotation) | **Not done** (unless added elsewhere) |
+| Rate limiting + anti-abuse | **Partial** — per-user Telegram limits via env `TELEGRAM_RATE_LIMIT_MSG_PER_MIN` / `TELEGRAM_RATE_LIMIT_CALLBACK_PER_MIN`; Redis-based update dedup in dispatcher; remaining gap: no broader abuse controls (e.g. global/IP-level throttling or operator blocklist flow) |
+| Idempotent handler ops for critical paths | **Partial** — wallet/outbox idempotency in repository + Telegram `update_id` dedup at transport layer; duplicate updates are now explicitly logged with structured fields (`update_id`, `telegram_user_id`, `kind`); remaining gap: no unified idempotency contract across all critical handlers/channels |
+| Health/readiness + structured logs + alerting | **Partial** — `/healthz` + `/readyz` implemented, health includes metadata (`version`, `commit`); dead-letter webhook failures now emit structured warning/error logs (request build/send/non-2xx), but external alert delivery/escalation automation is still not wired |
+| Runbook (rollback, DB recovery, secret rotation) | **Done** — `docs/ops/RUNBOOK.md` covers rollback, DB recovery basics, secret rotation, and minimum alerting contract |
 
 ---
 
@@ -69,9 +69,9 @@ This file mirrors the user-maintained RFC checklist and records **implementation
 
 | Item | Status |
 |------|--------|
-| Telegram Payments / Stars / external PSP | **Not done** |
-| Reconciliation procedures for edge cases | **Not done** |
-| Resilience test/live scenarios for payments | **Not done** |
+| Telegram Payments / Stars / external PSP | **Partial** — internal paid booking + ledger/outbox flow is in place (`ConfirmPaidClinicBooking`, `payment_confirmed`, `operation_id` idempotency), but Telegram Stars/`sendInvoice`/external PSP transport is not implemented |
+| Reconciliation procedures for edge cases | **Partial** — mismatch detection exists (`CountWalletBalanceMismatches`) and reconciliation integration tests are present; manual operator runbook is documented in `docs/ops/RUNBOOK.md` |
+| Resilience test/live scenarios for payments | **Partial** — memory+Postgres tests cover idempotency, insufficient funds, refund-after-start policy, and read-model consistency; no live Telegram payment scenario tests yet |
 
 **Implementation plan (writing-plans):** [docs/superpowers/plans/2026-04-10-online-payments-rfc-section-6.md](superpowers/plans/2026-04-10-online-payments-rfc-section-6.md) — Telegram Stars top-up first; PSP stub + reconciliation queries; integration tests for idempotent credit.
 
@@ -81,4 +81,4 @@ This file mirrors the user-maintained RFC checklist and records **implementation
 
 - **Wallet Ledger (section 1)** is largely complete; main gap is **policy storage model** (DB / per service) if required.
 - **Section 2 (Outbox + Worker)** is **complete** for the RFC checklist above.
-- **Sections 3–6** are mostly **future work** or **partially** addressed.
+- **Sections 3–6** remain mostly **partial** with key gaps in payment transport and product analytics depth.

@@ -1118,6 +1118,25 @@ func (r *PostgresRepository) CountBookingsConfirmedSinceWithOptionalSpecialty(ct
 	return count, err
 }
 
+func (r *PostgresRepository) CountRetentionUsersSince(ctx context.Context, since time.Time) (int64, error) {
+	var count int64
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM (
+			SELECT s.telegram_user_id
+			FROM analytics_events s
+			INNER JOIN analytics_events b
+				ON b.telegram_user_id = s.telegram_user_id
+			WHERE s.event_type = 'cmd_start'
+			  AND b.event_type = 'booking_confirmed'
+			  AND s.created_at >= $1
+			  AND b.created_at >= $1
+			  AND s.telegram_user_id IS NOT NULL
+			GROUP BY s.telegram_user_id
+		) retained`, since).Scan(&count)
+	return count, err
+}
+
 func (r *PostgresRepository) ConfirmPaidClinicBooking(ctx context.Context, userID, feeCents, specialtyID, doctorID, slotID int64, operationID string) (PaidBookingResult, error) {
 	if err := r.ensureOutboxSchema(ctx); err != nil {
 		return PaidBookingResult{}, err
@@ -1501,6 +1520,36 @@ func (r *PostgresRepository) CountWalletBalanceMismatches(ctx context.Context) (
 		   OR (last_tx.balance_after IS NOT NULL AND up.balance_cents <> last_tx.balance_after)
 	`).Scan(&mismatches)
 	return mismatches, err
+}
+
+func (r *PostgresRepository) ListWalletTransactionsForReconciliation(ctx context.Context, filter WalletReconciliationFilter) ([]WalletTransaction, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, telegram_user_id, operation_id, tx_type, amount_cents, balance_before, balance_after, related_booking_id, metadata_json::text, created_at
+		FROM wallet_transactions
+		WHERE ($1 = '' OR operation_id LIKE ($1 || '%'))
+		  AND ($2 = '' OR metadata_json->>'provider' = $2)
+		ORDER BY id DESC
+		LIMIT $3
+	`, strings.TrimSpace(filter.OperationPrefix), strings.TrimSpace(filter.MetadataProvider), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]WalletTransaction, 0, limit)
+	for rows.Next() {
+		var tx WalletTransaction
+		if err := rows.Scan(&tx.ID, &tx.TelegramUserID, &tx.OperationID, &tx.TxType, &tx.AmountCents, &tx.BalanceBefore, &tx.BalanceAfter, &tx.RelatedBookingID, &tx.MetadataJSON, &tx.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, tx)
+	}
+	return out, rows.Err()
 }
 
 func (r *PostgresRepository) UpsertWalletBalanceReadModel(ctx context.Context, userID int64, balanceCents int64, lastTxID *int64) error {
