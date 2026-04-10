@@ -1051,13 +1051,7 @@ func (h Handlers) handleAdminCallback(q *tgbotapi.CallbackQuery) {
 	case "adminupsert":
 		text, err = h.Booking.StartAdminUpsertAdmin(context.Background(), userID)
 	case "analytics":
-		days := 7
-		if len(parts) >= 3 {
-			if parsedDays, ok := parsePositiveInt(parts[2]); ok && (parsedDays == 7 || parsedDays == 30) {
-				days = parsedDays
-			}
-		}
-		report, errAn := h.Booking.AdminAnalyticsReport(context.Background(), userID, days, nil)
+		report, errAn := h.Booking.AdminAnalyticsReport(context.Background(), userID)
 		err = nil
 		if errAn != nil {
 			text = "Нет доступа к аналитике."
