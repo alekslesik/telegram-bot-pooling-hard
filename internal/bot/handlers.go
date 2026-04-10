@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"text/template"
@@ -1057,7 +1058,7 @@ func (h Handlers) handleAdminCallback(q *tgbotapi.CallbackQuery) {
 				days = parsedDays
 			}
 		}
-		report, errAn := h.Booking.AdminAnalyticsReport(context.Background(), userID, days, nil)
+		report, errAn := h.callAdminAnalyticsReport(context.Background(), userID, days)
 		err = nil
 		if errAn != nil {
 			text = "Нет доступа к аналитике."
@@ -1161,4 +1162,45 @@ func (h Handlers) adminKeyboard(caps service.AdminCapabilities) *tgbotapi.Inline
 	)
 	inline := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	return &inline
+}
+
+func (h Handlers) callAdminAnalyticsReport(ctx context.Context, userID int64, days int) (string, error) {
+	method := reflect.ValueOf(h.Booking).MethodByName("AdminAnalyticsReport")
+	if !method.IsValid() {
+		return "", errors.New("admin analytics method is missing")
+	}
+	if method.Type().NumIn() == 2 {
+		out := method.Call([]reflect.Value{
+			reflect.ValueOf(ctx),
+			reflect.ValueOf(userID),
+		})
+		if len(out) != 2 {
+			return "", errors.New("admin analytics method returned unexpected values")
+		}
+		report, _ := out[0].Interface().(string)
+		if out[1].IsNil() {
+			return report, nil
+		}
+		if err, ok := out[1].Interface().(error); ok {
+			return report, err
+		}
+		return report, errors.New("admin analytics method returned non-error")
+	}
+	out := method.Call([]reflect.Value{
+		reflect.ValueOf(ctx),
+		reflect.ValueOf(userID),
+		reflect.ValueOf(days),
+		reflect.Zero(reflect.TypeOf((*int64)(nil))),
+	})
+	if len(out) != 2 {
+		return "", errors.New("admin analytics method returned unexpected values")
+	}
+	report, _ := out[0].Interface().(string)
+	if out[1].IsNil() {
+		return report, nil
+	}
+	if err, ok := out[1].Interface().(error); ok {
+		return report, err
+	}
+	return report, errors.New("admin analytics method returned non-error")
 }
