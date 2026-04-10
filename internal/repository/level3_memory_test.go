@@ -344,3 +344,152 @@ func TestMemoryRepository_ConfirmPaidClinicBooking_EnqueuesRFCOutboxEvents(t *te
 		t.Fatalf("expected booking_created and payment_confirmed once each, got %+v", seen)
 	}
 }
+
+func TestMemoryRepository_AnalyticsAggregateCounters(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	since := time.Now().UTC().Add(-1 * time.Hour)
+
+	const (
+		bookerID   int64 = 9301
+		referrerID int64 = 9302
+		refereeID  int64 = 9303
+	)
+
+	if _, err := repo.EnsureUserProfile(ctx, bookerID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.EnsureUserProfile(ctx, referrerID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.EnsureUserProfile(ctx, refereeID); err != nil {
+		t.Fatal(err)
+	}
+
+	referrer, err := repo.GetUserProfile(ctx, referrerID)
+	if err != nil {
+		t.Fatalf("get referrer profile: %v", err)
+	}
+	if err := repo.ApplyReferralCodeIfNew(ctx, refereeID, referrer.ReferralCode); err != nil {
+		t.Fatalf("apply referral code: %v", err)
+	}
+	if err := repo.GrantReferralRewardsOnRegistration(ctx, refereeID, 50, 100); err != nil {
+		t.Fatalf("grant referral rewards: %v", err)
+	}
+
+	repo.mu.Lock()
+	slot := repo.doctorSlots[1]
+	slot.StartAt = time.Now().UTC().Add(-30 * time.Minute)
+	repo.doctorSlots[1] = slot
+	repo.mu.Unlock()
+
+	noShowBooking, err := repo.ConfirmPaidClinicBooking(ctx, bookerID, 100, 1, 1, 1, "op-agg-noshow")
+	if err != nil {
+		t.Fatalf("confirm no-show booking: %v", err)
+	}
+	cancelBooking, err := repo.ConfirmPaidClinicBooking(ctx, bookerID, 100, 1, 1, 2, "op-agg-cancel")
+	if err != nil {
+		t.Fatalf("confirm cancellable booking: %v", err)
+	}
+	if _, err := repo.CancelClinicBooking(ctx, bookerID, cancelBooking.BookingID); err != nil {
+		t.Fatalf("cancel booking: %v", err)
+	}
+	if _, err := repo.ConfirmPaidClinicBooking(ctx, bookerID, 100, 2, 2, 11, "op-agg-specialty2"); err != nil {
+		t.Fatalf("confirm specialty2 booking: %v", err)
+	}
+	if noShowBooking.BookingID == 0 {
+		t.Fatal("expected non-zero no-show booking id")
+	}
+
+	gotCancelled, err := repo.CountClinicBookingsCancelledSince(ctx, since)
+	if err != nil || gotCancelled != 1 {
+		t.Fatalf("cancelled count mismatch: got=%d err=%v", gotCancelled, err)
+	}
+	gotNoShow, err := repo.CountNoShowProxySince(ctx, since)
+	if err != nil || gotNoShow != 1 {
+		t.Fatalf("no-show proxy mismatch: got=%d err=%v", gotNoShow, err)
+	}
+	gotReferral, err := repo.CountReferralRewardsGrantedSince(ctx, since)
+	if err != nil || gotReferral != 1 {
+		t.Fatalf("referral rewards mismatch: got=%d err=%v", gotReferral, err)
+	}
+	gotConfirmedAll, err := repo.CountBookingsConfirmedSinceWithOptionalSpecialty(ctx, since, nil)
+	if err != nil || gotConfirmedAll != 2 {
+		t.Fatalf("confirmed all mismatch: got=%d err=%v", gotConfirmedAll, err)
+	}
+	specID := int64(1)
+	gotConfirmedSpec1, err := repo.CountBookingsConfirmedSinceWithOptionalSpecialty(ctx, since, &specID)
+	if err != nil || gotConfirmedSpec1 != 1 {
+		t.Fatalf("confirmed spec1 mismatch: got=%d err=%v", gotConfirmedSpec1, err)
+	}
+}
+
+func TestMemoryRepository_ApplyTelegramStarsTopUp_IdempotentByChargeID(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	const userID int64 = 9301
+
+	if _, err := repo.EnsureUserProfile(ctx, userID); err != nil {
+		t.Fatal(err)
+	}
+	before, err := repo.GetUserProfile(ctx, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := repo.ApplyTelegramStarsTopUp(ctx, userID, 10, 100, "charge-9301", `{"kind":"stars_topup"}`)
+	if err != nil {
+		t.Fatalf("first top-up error: %v", err)
+	}
+	if first.AlreadyApplied {
+		t.Fatal("first top-up must not be marked as already applied")
+	}
+	if first.CreditedCents != 1000 {
+		t.Fatalf("expected first credited cents 1000, got %d", first.CreditedCents)
+	}
+	if first.BalanceAfter != before.BalanceCents+1000 {
+		t.Fatalf("unexpected first balance after: got=%d want=%d", first.BalanceAfter, before.BalanceCents+1000)
+	}
+
+	second, err := repo.ApplyTelegramStarsTopUp(ctx, userID, 10, 100, "charge-9301", `{"kind":"stars_topup"}`)
+	if err != nil {
+		t.Fatalf("second top-up error: %v", err)
+	}
+	if !second.AlreadyApplied {
+		t.Fatal("second top-up must be idempotent")
+	}
+	if second.CreditedCents != 1000 {
+		t.Fatalf("expected idempotent credited cents 1000, got %d", second.CreditedCents)
+	}
+	if second.BalanceAfter != first.BalanceAfter {
+		t.Fatalf("balance changed on idempotent call: first=%d second=%d", first.BalanceAfter, second.BalanceAfter)
+	}
+}
+
+func TestMemoryRepository_ApplyTelegramStarsTopUp_UpdatesWalletReadModel(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	const userID int64 = 9302
+
+	if _, err := repo.EnsureUserProfile(ctx, userID); err != nil {
+		t.Fatal(err)
+	}
+	res, err := repo.ApplyTelegramStarsTopUp(ctx, userID, 3, 100, "charge-9302", "")
+	if err != nil {
+		t.Fatalf("apply top-up error: %v", err)
+	}
+	if res.CreditedCents != 300 {
+		t.Fatalf("expected 300 credited cents, got %d", res.CreditedCents)
+	}
+
+	model, err := repo.GetWalletBalanceReadModel(ctx, userID)
+	if err != nil {
+		t.Fatalf("get wallet read model error: %v", err)
+	}
+	if model.BalanceCents != res.BalanceAfter {
+		t.Fatalf("wallet read model balance mismatch: got=%d want=%d", model.BalanceCents, res.BalanceAfter)
+	}
+	if model.LastTxID == nil {
+		t.Fatal("expected wallet read model last tx id")
+	}
+}
