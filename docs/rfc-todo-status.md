@@ -11,12 +11,12 @@ This file mirrors the user-maintained RFC checklist and records **implementation
 | Item | Status |
 |------|--------|
 | Partial refund policy (percent / time windows) | **Done** — `ClinicBookingRefundPolicy`, env (`CLINIC_REFUND_*`), `calculateClinicBookingRefund` |
-| Formalize policy model (config / table / per service) | **Partial** — in code + env; **no** DB table or per-service policy |
+| Formalize policy model (config / table / per service) | **Done** — DB table `clinic_refund_policies` (+ audit log), runtime fallback order `specialty -> global -> env/default`; API methods allow global and per-specialty updates |
 | Postgres integration tests (debit / refund / idempotency / read-model) | **Done** — e.g. wallet integration tests, PR #31 |
 | UX signal “refund blocked by policy” + tests | **Done** — PR #29 |
 | (Optional) reconcile `user_profiles` vs `wallet_balance_read_model` vs `wallet_transactions` | **Done** — admin/report metric (#33) |
 
-**Open follow-up (if still in scope):** persist policy in DB or per specialty/service.
+**Open follow-up (optional):** add service-level policy overrides (current granularity is global + per-specialty).
 
 ---
 

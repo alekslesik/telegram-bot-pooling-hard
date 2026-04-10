@@ -320,6 +320,8 @@ type BookingRepository interface {
 	CountReferralRewardsGrantedSince(ctx context.Context, since time.Time) (int64, error)
 	CountBookingsConfirmedSinceWithOptionalSpecialty(ctx context.Context, since time.Time, specialtyID *int64) (int64, error)
 	CountRetentionUsersSince(ctx context.Context, since time.Time) (int64, error)
+	SetClinicBookingRefundPolicyForSpecialty(ctx context.Context, specialtyID *int64, policy ClinicBookingRefundPolicy) error
+	GetClinicBookingRefundPolicyForSpecialty(ctx context.Context, specialtyID int64) (ClinicBookingRefundPolicy, error)
 	ConfirmPaidClinicBooking(ctx context.Context, userID, feeCents, specialtyID, doctorID, slotID int64, operationID string) (PaidBookingResult, error)
 	ApplyTelegramStarsTopUp(ctx context.Context, userID, starsCount, kopeksPerStar int64, telegramPaymentChargeID, metadataJSON string) (StarsTopUpResult, error)
 	UpsertWalletBalanceReadModel(ctx context.Context, userID int64, balanceCents int64, lastTxID *int64) error
@@ -359,18 +361,19 @@ type MemoryRepository struct {
 	nextAdminLog int64
 	adminMeta    map[int64]AdminRecord
 
-	userProfiles       map[int64]UserProfile
-	analyticsEvents    []memoryAnalyticsEvent
-	nextAnalyticID     int64
-	walletTx           map[int64]WalletTransaction
-	walletTxByOp       map[string]int64
-	nextWalletTxID     int64
-	walletReadModel    map[int64]WalletBalanceReadModel
-	outboxEvents       map[int64]OutboxEvent
-	nextOutboxID       int64
-	clinicRefundPolicy ClinicBookingRefundPolicy
-	blackoutRules      map[int64]ScheduleBlackoutRule
-	nextBlackoutRuleID int64
+	userProfiles                  map[int64]UserProfile
+	analyticsEvents               []memoryAnalyticsEvent
+	nextAnalyticID                int64
+	walletTx                      map[int64]WalletTransaction
+	walletTxByOp                  map[string]int64
+	nextWalletTxID                int64
+	walletReadModel               map[int64]WalletBalanceReadModel
+	outboxEvents                  map[int64]OutboxEvent
+	nextOutboxID                  int64
+	clinicRefundPolicy            ClinicBookingRefundPolicy
+	clinicRefundPolicyBySpecialty map[int64]ClinicBookingRefundPolicy
+	blackoutRules                 map[int64]ScheduleBlackoutRule
+	nextBlackoutRuleID            int64
 }
 
 type memoryAnalyticsEvent struct {
@@ -429,39 +432,40 @@ func calculateClinicBookingRefund(policy ClinicBookingRefundPolicy, debitAmount 
 
 func NewMemoryRepository() *MemoryRepository {
 	r := &MemoryRepository{
-		services:           make(map[int64]Service),
-		slots:              make(map[int64]Slot),
-		bookings:           make(map[int64]Booking),
-		states:             make(map[int64]ConversationState),
-		clients:            make(map[int64]Client),
-		specialties:        make(map[int64]Specialty),
-		doctors:            make(map[int64]Doctor),
-		doctorLinks:        make(map[int64]map[int64]struct{}),
-		doctorSlots:        make(map[int64]DoctorSlot),
-		clinicBooking:      make(map[int64]ClinicBooking),
-		documents:          make(map[int64]UserDocument),
-		nextBookingID:      1,
-		nextServiceID:      1,
-		nextSlotID:         1,
-		nextClinicID:       1,
-		nextDocID:          1,
-		admins:             make(map[int64]AdminRole),
-		adminsActive:       make(map[int64]bool),
-		adminLogs:          []AdminAuditLog{},
-		nextAdminLog:       1,
-		adminMeta:          make(map[int64]AdminRecord),
-		userProfiles:       make(map[int64]UserProfile),
-		analyticsEvents:    []memoryAnalyticsEvent{},
-		nextAnalyticID:     1,
-		walletTx:           make(map[int64]WalletTransaction),
-		walletTxByOp:       make(map[string]int64),
-		nextWalletTxID:     1,
-		walletReadModel:    make(map[int64]WalletBalanceReadModel),
-		outboxEvents:       make(map[int64]OutboxEvent),
-		nextOutboxID:       1,
-		clinicRefundPolicy: DefaultClinicBookingRefundPolicy(),
-		blackoutRules:      make(map[int64]ScheduleBlackoutRule),
-		nextBlackoutRuleID: 1,
+		services:                      make(map[int64]Service),
+		slots:                         make(map[int64]Slot),
+		bookings:                      make(map[int64]Booking),
+		states:                        make(map[int64]ConversationState),
+		clients:                       make(map[int64]Client),
+		specialties:                   make(map[int64]Specialty),
+		doctors:                       make(map[int64]Doctor),
+		doctorLinks:                   make(map[int64]map[int64]struct{}),
+		doctorSlots:                   make(map[int64]DoctorSlot),
+		clinicBooking:                 make(map[int64]ClinicBooking),
+		documents:                     make(map[int64]UserDocument),
+		nextBookingID:                 1,
+		nextServiceID:                 1,
+		nextSlotID:                    1,
+		nextClinicID:                  1,
+		nextDocID:                     1,
+		admins:                        make(map[int64]AdminRole),
+		adminsActive:                  make(map[int64]bool),
+		adminLogs:                     []AdminAuditLog{},
+		nextAdminLog:                  1,
+		adminMeta:                     make(map[int64]AdminRecord),
+		userProfiles:                  make(map[int64]UserProfile),
+		analyticsEvents:               []memoryAnalyticsEvent{},
+		nextAnalyticID:                1,
+		walletTx:                      make(map[int64]WalletTransaction),
+		walletTxByOp:                  make(map[string]int64),
+		nextWalletTxID:                1,
+		walletReadModel:               make(map[int64]WalletBalanceReadModel),
+		outboxEvents:                  make(map[int64]OutboxEvent),
+		nextOutboxID:                  1,
+		clinicRefundPolicy:            DefaultClinicBookingRefundPolicy(),
+		clinicRefundPolicyBySpecialty: make(map[int64]ClinicBookingRefundPolicy),
+		blackoutRules:                 make(map[int64]ScheduleBlackoutRule),
+		nextBlackoutRuleID:            1,
 	}
 	r.seed()
 	return r
@@ -476,6 +480,30 @@ func (r *MemoryRepository) SetClinicBookingRefundPolicy(policy ClinicBookingRefu
 	defer r.mu.Unlock()
 	r.clinicRefundPolicy = normalized
 	return nil
+}
+
+func (r *MemoryRepository) SetClinicBookingRefundPolicyForSpecialty(_ context.Context, specialtyID *int64, policy ClinicBookingRefundPolicy) error {
+	normalized, err := NormalizeClinicBookingRefundPolicy(policy)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if specialtyID == nil {
+		r.clinicRefundPolicy = normalized
+		return nil
+	}
+	r.clinicRefundPolicyBySpecialty[*specialtyID] = normalized
+	return nil
+}
+
+func (r *MemoryRepository) GetClinicBookingRefundPolicyForSpecialty(_ context.Context, specialtyID int64) (ClinicBookingRefundPolicy, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if p, ok := r.clinicRefundPolicyBySpecialty[specialtyID]; ok {
+		return p, nil
+	}
+	return r.clinicRefundPolicy, nil
 }
 
 func randomReferralCode() (string, error) {
@@ -744,7 +772,11 @@ func (r *MemoryRepository) CancelClinicBooking(_ context.Context, userID, bookin
 		if !ok {
 			break
 		}
-		refunded, refundIsPartial, refundBlockedByPolicy = calculateClinicBookingRefund(r.clinicRefundPolicy, tx.AmountCents, now, slotStart)
+		policy := r.clinicRefundPolicy
+		if p, ok := r.clinicRefundPolicyBySpecialty[b.SpecialtyID]; ok {
+			policy = p
+		}
+		refunded, refundIsPartial, refundBlockedByPolicy = calculateClinicBookingRefund(policy, tx.AmountCents, now, slotStart)
 		if refunded <= 0 {
 			break
 		}

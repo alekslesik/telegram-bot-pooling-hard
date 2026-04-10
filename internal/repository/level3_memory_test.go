@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+func int64ptr(v int64) *int64 { return &v }
+
 func TestMemoryRepository_ConfirmPaidClinicBooking_Insufficient(t *testing.T) {
 	repo := NewMemoryRepository()
 	ctx := context.Background()
@@ -194,6 +196,44 @@ func TestMemoryRepository_CancelClinicBooking_BeforeStartPartialRefund(t *testin
 	wantBalance := p0.BalanceCents - 50
 	if p1.BalanceCents != wantBalance {
 		t.Fatalf("unexpected balance after partial refund: want=%d got=%d", wantBalance, p1.BalanceCents)
+	}
+}
+
+func TestMemoryRepository_CancelClinicBooking_PerSpecialtyPolicy(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	const userID int64 = 451
+
+	if _, err := repo.EnsureUserProfile(ctx, userID); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SetClinicBookingRefundPolicyForSpecialty(ctx, nil, ClinicBookingRefundPolicy{
+		PartialWindow:  24 * time.Hour,
+		PartialPercent: 50,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	specPolicy := ClinicBookingRefundPolicy{PartialWindow: 24 * time.Hour, PartialPercent: 10}
+	if err := repo.SetClinicBookingRefundPolicyForSpecialty(ctx, int64ptr(1), specPolicy); err != nil {
+		t.Fatal(err)
+	}
+	// Keep slot inside partial window.
+	repo.mu.Lock()
+	slot := repo.doctorSlots[1]
+	slot.StartAt = time.Now().UTC().Add(3 * time.Hour)
+	repo.doctorSlots[1] = slot
+	repo.mu.Unlock()
+
+	paid, err := repo.ConfirmPaidClinicBooking(ctx, userID, 100, 1, 1, 1, "op-cancel-partial-451")
+	if err != nil {
+		t.Fatalf("paid booking error: %v", err)
+	}
+	res, err := repo.CancelClinicBooking(ctx, userID, paid.BookingID)
+	if err != nil {
+		t.Fatalf("cancel error: %v", err)
+	}
+	if !res.RefundIsPartial || res.RefundedCents != 10 {
+		t.Fatalf("expected specialty partial 10 cents, got partial=%v refunded=%d", res.RefundIsPartial, res.RefundedCents)
 	}
 }
 
