@@ -44,7 +44,7 @@ This file mirrors the user-maintained RFC checklist and records **implementation
 ## 4) Admin v2 & roles
 
 **Implementation plan (writing-plans):** [`docs/superpowers/plans/2026-04-10-admin-v2-roles-implementation.md`](superpowers/plans/2026-04-10-admin-v2-roles-implementation.md)
-**Const:** `ready = 100%`
+**Const:** `ready_section_4_admin_v2_roles = 100%`
 
 | Item | Status |
 |------|--------|
