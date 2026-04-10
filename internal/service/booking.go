@@ -480,6 +480,7 @@ func (s *BookingService) AdminListBlackouts(ctx context.Context, userID int64, l
 		}
 		fmt.Fprintf(&b, "- id=%d doctor=%d specialty=%d %s..%s reason=%s\n", it.ID, doc, spec, it.StartsAt.Format(time.RFC3339), it.EndsAt.Format(time.RFC3339), it.Reason)
 	}
+	b.WriteString("\nДля деактивации используйте callback: admin:blackoutoff:<id>")
 	return strings.TrimSpace(b.String()), nil
 }
 

@@ -253,3 +253,100 @@ func TestMemoryRepository_AdminRosterUpsertAndList(t *testing.T) {
 		}
 	}
 }
+
+func TestMemoryRepository_CloseOpenDoctorDaysRange(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	from := time.Now().UTC().AddDate(0, 0, 1)
+	to := from.AddDate(0, 0, 1)
+	if _, err := repo.GenerateDoctorSlotsDateRange(ctx, 1, 1, from, to, 9*60, 10*60, 30); err != nil {
+		t.Fatalf("seed range generate error: %v", err)
+	}
+	closed, err := repo.CloseDoctorDaysRange(ctx, 1, 1, from, to)
+	if err != nil {
+		t.Fatalf("close range error: %v", err)
+	}
+	if closed == 0 {
+		t.Fatalf("expected closed slots > 0")
+	}
+	opened, err := repo.OpenDoctorDaysRange(ctx, 1, 1, from, to)
+	if err != nil {
+		t.Fatalf("open range error: %v", err)
+	}
+	if opened == 0 {
+		t.Fatalf("expected opened slots > 0")
+	}
+}
+
+func TestMemoryRepository_BlackoutLifecycleAndBlocking(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	day := time.Date(2031, 2, 1, 0, 0, 0, 0, time.UTC)
+	doctorID, specialtyID := int64(1), int64(1)
+	start := day.Add(9 * time.Hour)
+	end := day.Add(11 * time.Hour)
+	rule, err := repo.CreateBlackoutRule(ctx, ScheduleBlackoutRule{
+		Scope:       BlackoutScopeDoctorSpecialty,
+		Kind:        BlackoutKindHoliday,
+		DoctorID:    &doctorID,
+		SpecialtyID: &specialtyID,
+		StartsAt:    start,
+		EndsAt:      end,
+		Reason:      "holiday",
+	})
+	if err != nil {
+		t.Fatalf("create blackout error: %v", err)
+	}
+	list, err := repo.ListBlackoutRules(ctx, day, day.Add(24*time.Hour), &doctorID, &specialtyID)
+	if err != nil {
+		t.Fatalf("list blackout error: %v", err)
+	}
+	if len(list) == 0 {
+		t.Fatalf("expected blackout rule in list")
+	}
+	inserted, err := repo.GenerateDoctorSlots(ctx, doctorID, specialtyID, day, 9*60, 11*60, 30)
+	if err != nil {
+		t.Fatalf("generate with blackout error: %v", err)
+	}
+	if inserted != 0 {
+		t.Fatalf("expected blackout to block generation, got inserted=%d", inserted)
+	}
+	if err := repo.DeactivateBlackoutRule(ctx, rule.ID); err != nil {
+		t.Fatalf("deactivate blackout error: %v", err)
+	}
+	inserted, err = repo.GenerateDoctorSlots(ctx, doctorID, specialtyID, day, 9*60, 11*60, 30)
+	if err != nil {
+		t.Fatalf("generate after deactivate error: %v", err)
+	}
+	if inserted == 0 {
+		t.Fatalf("expected generation after deactivation")
+	}
+}
+
+func TestMemoryRepository_ListAdminAuditLogs_OrderAndLimit(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	_ = repo.LogAdminAction(ctx, 1, "a1", "{}")
+	_ = repo.LogAdminAction(ctx, 2, "a2", "{}")
+	_ = repo.LogAdminAction(ctx, 1, "a3", "{}")
+	rows, err := repo.ListAdminAuditLogs(ctx, nil, 2, 0)
+	if err != nil {
+		t.Fatalf("list audit logs error: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected limit=2 rows, got %d", len(rows))
+	}
+	if rows[0].Action != "a3" {
+		t.Fatalf("expected reverse order latest first, got %s", rows[0].Action)
+	}
+	adminID := int64(1)
+	rows, err = repo.ListAdminAuditLogs(ctx, &adminID, 0, 0)
+	if err != nil {
+		t.Fatalf("list filtered audit logs error: %v", err)
+	}
+	for _, r := range rows {
+		if r.AdminUserID != adminID {
+			t.Fatalf("expected only admin_id=%d, got %d", adminID, r.AdminUserID)
+		}
+	}
+}

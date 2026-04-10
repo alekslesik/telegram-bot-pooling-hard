@@ -44,13 +44,14 @@ This file mirrors the user-maintained RFC checklist and records **implementation
 ## 4) Admin v2 & roles
 
 **Implementation plan (writing-plans):** [`docs/superpowers/plans/2026-04-10-admin-v2-roles-implementation.md`](superpowers/plans/2026-04-10-admin-v2-roles-implementation.md)
+**Const:** `ready = 100%`
 
 | Item | Status |
 |------|--------|
-| Roles owner/admin/operator to full RFC scope | **Partial** — roles + `canManage*` helpers |
-| Batch slot operations | **Not done** |
-| Blackout / holiday rules | **Not done** |
-| Extended audit trail for critical ops | **Partial** |
+| Roles owner/admin/operator to full RFC scope | **Done** — role matrix + owner/admin/operator gates, owner admin-roster operations, bot capability-based visibility |
+| Batch slot operations | **Done** — range generate/close/open flows with repository+service+bot coverage |
+| Blackout / holiday rules | **Done** — blackout rules migration, enforcement in generation/listing/booking, add/list/deactivate admin flows |
+| Extended audit trail for critical ops | **Done** — structured JSON details, deny/open/access logs, audit tail read path |
 
 ---
 
