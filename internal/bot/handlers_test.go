@@ -253,7 +253,7 @@ func TestHandlers_HandleCommand_AllRegistered(t *testing.T) {
 		cmdLen   int
 		contains string
 	}{
-		{"start", "/start", 6, "сервисов с записью"},
+		{"start", "/start", 6, "шаблон telegram-бота"},
 		{"help", "/help", 5, "Что я умею"},
 		{"ping", "/ping", 5, "pong"},
 	}

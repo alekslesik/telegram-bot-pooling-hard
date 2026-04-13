@@ -1,40 +1,30 @@
 # telegram-bot-pooling-hard
 
-Level 2–3 Telegram bot template: service booking (клиника / салон) плюс задел под «продвинутый» бот (баланс, рефералы, i18n, Redis, аналитика). Целевой профиль Level 3 описан в [RFC.md](RFC.md).
+Production-oriented Telegram bot template for service appointment businesses (clinic, salon, studio, private practice, consulting).
+It is designed as a reusable baseline for client projects where booking, payments, admin operations, and reliability are required from day one.
 
-This repository is designed as a more advanced and sellable version of the first bot level, while keeping a similar project structure for easier maintenance and future feature development.
+The target Level 3 profile is documented in [RFC.md](RFC.md).
 
-## Product Specification (Level 2)
+## What This Template Can Do
 
-### Goal
+- Guided appointment booking flow (`/book`) with persistent conversation state.
+- Slot management and booking lifecycle (create, confirm, cancel).
+- Wallet ledger for paid bookings, refunds, and idempotent money operations.
+- Telegram Stars top-up flow and external PSP callback support.
+- Referral mechanics (referrer/referee rewards).
+- Admin panel with role-based access (`owner/admin/operator`), batch slot operations, blackout rules, and audit trail.
+- Analytics events, outbox worker with retries/dead-letter handling, and admin analytics reports.
+- Health/readiness endpoints and operational runbook for incidents.
 
-Build a medium-complexity Telegram bot for service appointments.
+## Tech Stack
 
-### Core features
-
-- Step-by-step conversational flows (state machine / wizard).
-- Persistent data storage in PostgreSQL or MySQL.
-- Basic in-bot owner admin panel:
-  - broadcast management;
-  - simple statistics viewing.
-
-### Integrations
-
-- Bitrix24 CRM.
-- Email notifications.
-- HTTP webhooks.
-
-### Tech requirements
-
-- Go service + database.
-- Long polling mode.
-- Layered project structure: `transport -> service -> repository`.
-
-## Current Repository Status
-
-The project includes a Go bot scaffold, tests, Docker packaging, and CI/CD (`.github/workflows/ci.yml`, `release.yml`, `deploy.yml`).  
-**Booking:** MVP wizard с записью к врачу, отменой, документами, админ-инструментами по слотам.  
-**Level 3 (RFC):** профиль пользователя (`user_profiles`), списание баланса за запись, реферальные бонусы, RU/EN, события аналитики, опциональный Redis для кеша списка специализаций. Миграция `006_level3_profiles_analytics.sql`.
+- **Language:** Go 1.26+
+- **Bot transport:** Telegram Bot API (long polling)
+- **Storage:** PostgreSQL (primary), in-memory repository for tests/dev fallback
+- **Cache (optional):** Redis (specialty list cache)
+- **Architecture:** layered `transport -> service -> repository`
+- **Infra:** Docker, Docker Compose
+- **CI/CD:** GitHub Actions (`ci.yml`, `release.yml`, `deploy.yml`)
 
 ### Implemented MVP Wizard Flow
 
@@ -86,27 +76,27 @@ make run
 
 ### Testing
 
-Запуск всех тестов (как в CI):
+Run all tests (same as CI):
 
 ```bash
 go test ./...
 ```
 
-Через Makefile:
+Via Makefile:
 
 ```bash
 make test
 ```
 
-Полная локальная проверка перед релизом (форматирование, `vet`, `staticcheck`, тесты, `govulncheck`, сборка Docker-образа):
+Full local pre-release check (formatting, `vet`, `staticcheck`, tests, `govulncheck`, Docker image build):
 
 ```bash
 make preprod
 ```
 
-В CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) выполняются `go test ./...`, `go vet ./...` и `docker build`. Тесты используют **in-memory** репозиторий, отдельная БД для `go test` не нужна.
+In CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)), the pipeline runs `go test ./...`, `go vet ./...`, and `docker build`. Tests use the **in-memory** repository, so a dedicated DB is not required for `go test`.
 
-Перед тегом и релизом локально имеет смысл прогнать **`make preprod`** и при необходимости проверить **`docker compose up --build`** (есть `secrets/postgres_password` и `.env`).
+Before tagging and releasing, run **`make preprod`** locally and, if needed, verify **`docker compose up --build`** (with `secrets/postgres_password` and `.env` in place).
 
 ### Run with Docker
 
@@ -166,18 +156,18 @@ If the GHCR image is **public**, login on the VPS is skipped when those two are 
 
 ### Release flow
 
-1. В GitHub → **Settings → Secrets and variables → Actions** должны быть заданы секреты из таблицы выше (`VPS_*`, `VPS_POSTGRES_PASSWORD`, при необходимости `GHCR_*`).
+1. In GitHub → **Settings → Secrets and variables → Actions**, configure the secrets listed above (`VPS_*`, `VPS_POSTGRES_PASSWORD`, and optionally `GHCR_*`).
 
-2. На актуальном `main` создайте и отправьте аннотированный тег версии:
+2. On up-to-date `main`, create and push an annotated version tag:
 
 ```bash
 git tag -a v1.0.2 -m "Release v1.0.2"
 git push origin v1.0.2
 ```
 
-3. Workflow **Release** ([`.github/workflows/release.yml`](.github/workflows/release.yml)) соберёт образ, опубликует его в **GHCR** и выполнит деплой на VPS (`VPS_APP_PATH`). Прогресс смотрите во вкладке **Actions**.
+3. The **Release** workflow ([`.github/workflows/release.yml`](.github/workflows/release.yml)) builds the image, publishes it to **GHCR**, and deploys to VPS (`VPS_APP_PATH`). Track progress in the **Actions** tab.
 
-4. При необходимости повторного выката того же тега без новой сборки — workflow **Deploy** (ручной запуск).
+4. If you need to redeploy the same tag without a new build, run the **Deploy** workflow manually.
 
 ### Troubleshooting deploy (`manifest unknown`)
 

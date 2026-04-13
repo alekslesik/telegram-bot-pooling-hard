@@ -51,3 +51,4 @@ Then choose the flow by change type:
 - Never commit or push directly to `main`.
 - Delete only local branches unless explicitly instructed otherwise.
 - Avoid destructive git operations unless explicitly requested.
+- Before creating any release tag, ensure working tree changes are committed; do not tag with uncommitted changes unless the user explicitly asks to tag current `HEAD` as-is.
